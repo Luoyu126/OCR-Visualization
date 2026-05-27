@@ -27,20 +27,8 @@ PAIR_COLORS = [
     "#e5e7eb",
 ]
 
-TOKEN_COLORS = [
-    "#fee2e2",
-    "#ffedd5",
-    "#fef9c3",
-    "#dcfce7",
-    "#dbeafe",
-    "#ede9fe",
-    "#fce7f3",
-    "#e2e8f0",
-    "#f5d0fe",
-    "#cffafe",
-    "#fef3c7",
-    "#d1fae5",
-]
+TOKEN_CORRECT_COLOR = "#dcfce7"
+TOKEN_ERROR_COLOR = "#fee2e2"
 
 
 def advantage_color(value: float) -> str:
@@ -56,8 +44,8 @@ def colorized_adv_html(value: float) -> str:
     return f"<span style='color:{color};font-weight:700'>{value:+.4f}</span>"
 
 
-def token_color(group_id: int) -> str:
-    return TOKEN_COLORS[int(group_id) % len(TOKEN_COLORS)]
+def token_reward_color(reward: float) -> str:
+    return TOKEN_CORRECT_COLOR if reward >= 0.999999 else TOKEN_ERROR_COLOR
 
 
 def render_text_block(title: str, content: str, *, height_px: int = 160) -> None:
@@ -86,8 +74,32 @@ def render_text_block(title: str, content: str, *, height_px: int = 160) -> None
 
 
 def render_code_block(title: str, content: str, *, language: str = "text") -> None:
+    _ = language
     st.markdown(f"**{title}**")
-    st.code(str(content or ""), language=language)
+    safe_text = html.escape(str(content or ""))
+    st.markdown(
+        f"""
+<div style="
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fafc;
+  color: #111111;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: 320px;
+  line-height: 1.45;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+">{safe_text}</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def format_table_source_with_tr_newlines(source: str) -> str:
@@ -144,8 +156,17 @@ def extract_matched_tr_pairs_from_chunks(chunks: list[dict[str, Any]]) -> list[l
     return pairs
 
 
-def _highlighted_table_content(table_html: str, row_color_map: dict[int, str]) -> str:
-    if not row_color_map:
+def _highlighted_table_content(
+    table_html: str,
+    row_color_map: dict[int, str],
+    row_info_map: dict[int, str] | None = None,
+    row_bad_reward_map: dict[int, bool] | None = None,
+    row_link_map: dict[int, str] | None = None,
+) -> str:
+    row_info_map = row_info_map or {}
+    row_bad_reward_map = row_bad_reward_map or {}
+    row_link_map = row_link_map or {}
+    if not row_color_map and not row_info_map and not row_bad_reward_map and not row_link_map:
         return _extract_table_content(table_html)
     wrapped = wrap_html_if_needed(table_html)
     try:
@@ -157,12 +178,21 @@ def _highlighted_table_content(table_html: str, row_color_map: dict[int, str]) -
         trs = table_node.xpath(".//tr")
         for idx, tr in enumerate(trs):
             color = row_color_map.get(idx)
-            if not color:
-                continue
             existing = tr.attrib.get("style", "").strip()
             if existing and not existing.endswith(";"):
                 existing = f"{existing};"
-            tr.attrib["style"] = f"{existing} background-color: {color};".strip()
+            style_parts: list[str] = []
+            if color:
+                style_parts.append(f"background-color: {color};")
+            if row_bad_reward_map.get(idx) and not color:
+                style_parts.append("background-color: #fee2e2;")
+            if row_info_map.get(idx):
+                tr.attrib["data-row-info"] = row_info_map[idx]
+                tr.attrib["title"] = row_info_map[idx]
+            if row_link_map.get(idx):
+                tr.attrib["data-link-id"] = row_link_map[idx]
+            cursor = " cursor: help;" if row_info_map.get(idx) else ""
+            tr.attrib["style"] = f"{existing} {' '.join(style_parts)} color: #111827;{cursor}".strip()
         return etree.tostring(table_node, encoding="unicode", method="html")
     except Exception:
         return _extract_table_content(table_html)
@@ -174,8 +204,17 @@ def render_table_html(
     *,
     height_px: int | None = None,
     row_color_map: dict[int, str] | None = None,
+    row_info_map: dict[int, str] | None = None,
+    row_bad_reward_map: dict[int, bool] | None = None,
+    row_link_map: dict[int, str] | None = None,
 ) -> None:
-    safe_content = _highlighted_table_content(table_html, row_color_map or {})
+    safe_content = _highlighted_table_content(
+        table_html,
+        row_color_map or {},
+        row_info_map=row_info_map,
+        row_bad_reward_map=row_bad_reward_map,
+        row_link_map=row_link_map,
+    )
     style_parts = [
         "border: 1px solid #d9d9d9",
         "border-radius: 8px",
@@ -194,11 +233,254 @@ def render_table_html(
   <style>
     table {{ border-collapse: collapse; width: 100%; font-size: 12px; }}
     td, th {{ border: 1px solid #d1d5db; padding: 4px 6px; vertical-align: top; }}
+    tr[title] {{ cursor: help; }}
   </style>
   {safe_content}
 </div>
 """,
         unsafe_allow_html=True,
+    )
+
+
+def render_interactive_table_html(
+    title: str,
+    table_html: str,
+    *,
+    height_px: int | None = None,
+    row_color_map: dict[int, str] | None = None,
+    row_info_map: dict[int, str] | None = None,
+    row_bad_reward_map: dict[int, bool] | None = None,
+    row_link_map: dict[int, str] | None = None,
+) -> None:
+    safe_content = _highlighted_table_content(
+        table_html,
+        row_color_map or {},
+        row_info_map=row_info_map,
+        row_bad_reward_map=row_bad_reward_map,
+        row_link_map=row_link_map,
+    )
+    component_id = f"table-hover-{stable_id(title + table_html[:1000] + str(len(row_info_map or {})))}"
+    max_height_css = "none" if height_px is None else f"{height_px}px"
+    min_height_css = "auto" if height_px is None else f"{height_px}px"
+    default_info = "Hover a matched table row to inspect chunk reward details."
+    st.markdown(f"**{title}**")
+    components.html(
+        f"""
+<style>
+#{component_id} {{
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #111827;
+}}
+#{component_id} .table-wrap {{
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  padding: 10px;
+  background: #ffffff;
+  overflow: auto;
+  min-height: {min_height_css};
+  max-height: {max_height_css};
+}}
+#{component_id} table {{ border-collapse: collapse; width: 100%; font-size: 12px; }}
+#{component_id} td, #{component_id} th {{ border: 1px solid #d1d5db; padding: 4px 6px; vertical-align: top; }}
+#{component_id} tr[data-row-info] {{ cursor: help; transition: box-shadow 0.12s ease, filter 0.12s ease; }}
+#{component_id} tr[data-row-info].active {{ box-shadow: inset 0 0 0 2px rgba(59, 130, 246, 0.75); filter: brightness(1.03); }}
+#{component_id} .info-card {{
+  margin-top: 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 12px;
+}}
+#{component_id} .info-title {{
+  font-size: 13px;
+  color: #4b5563;
+  font-weight: 600;
+  margin-bottom: 6px;
+}}
+#{component_id} .info-body {{
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+  min-height: 160px;
+  max-height: 260px;
+  overflow-y: auto;
+}}
+</style>
+<div id="{component_id}">
+  <div class="table-wrap">
+    {safe_content}
+  </div>
+  <div class="info-card">
+    <div class="info-title">Chunk Detail</div>
+    <div class="info-body" id="{component_id}-info">{html.escape(default_info)}</div>
+  </div>
+</div>
+<script>
+(function() {{
+  const root = document.getElementById("{component_id}");
+  if (!root) return;
+  const infoBox = document.getElementById("{component_id}-info");
+  const defaultInfo = {json.dumps(default_info)};
+  function clearActive() {{
+    root.querySelectorAll("tr[data-row-info].active").forEach((el) => el.classList.remove("active"));
+  }}
+  root.querySelectorAll("tr[data-row-info]").forEach((el) => {{
+    el.addEventListener("mouseenter", () => {{
+      clearActive();
+      el.classList.add("active");
+      if (infoBox) infoBox.textContent = el.getAttribute("data-row-info") || defaultInfo;
+    }});
+    el.addEventListener("mouseleave", () => {{
+      clearActive();
+      if (infoBox) infoBox.textContent = defaultInfo;
+    }});
+  }});
+}})();
+</script>
+""",
+        height=(height_px or 420) + 160,
+        scrolling=True,
+    )
+
+
+def render_interactive_table_pair_html(
+    *,
+    left_title: str,
+    left_table_html: str,
+    right_title: str,
+    right_table_html: str,
+    left_row_color_map: dict[int, str] | None = None,
+    right_row_color_map: dict[int, str] | None = None,
+    left_row_info_map: dict[int, str] | None = None,
+    right_row_info_map: dict[int, str] | None = None,
+    left_row_bad_reward_map: dict[int, bool] | None = None,
+    right_row_bad_reward_map: dict[int, bool] | None = None,
+    left_row_link_map: dict[int, str] | None = None,
+    right_row_link_map: dict[int, str] | None = None,
+    table_height_px: int = 300,
+) -> None:
+    left_content = _highlighted_table_content(
+        left_table_html,
+        left_row_color_map or {},
+        row_info_map=left_row_info_map,
+        row_bad_reward_map=left_row_bad_reward_map,
+        row_link_map=left_row_link_map,
+    )
+    right_content = _highlighted_table_content(
+        right_table_html,
+        right_row_color_map or {},
+        row_info_map=right_row_info_map,
+        row_bad_reward_map=right_row_bad_reward_map,
+        row_link_map=right_row_link_map,
+    )
+    component_id = f"table-pair-hover-{stable_id(left_table_html[:800] + right_table_html[:800])}"
+    default_info = "Hover a matched GT or Prediction table row to inspect chunk reward details."
+    components.html(
+        f"""
+<style>
+#{component_id} {{
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #111827;
+}}
+#{component_id} .tables {{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}}
+#{component_id} .table-title {{
+  font-weight: 600;
+  margin-bottom: 6px;
+}}
+#{component_id} .table-wrap {{
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  padding: 10px;
+  background: #ffffff;
+  overflow: auto;
+  max-height: {int(table_height_px)}px;
+}}
+#{component_id} table {{ border-collapse: collapse; width: 100%; font-size: 12px; }}
+#{component_id} td, #{component_id} th {{
+  border: 1px solid #d1d5db;
+  padding: 4px 6px;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}}
+#{component_id} tr[data-row-info] {{ cursor: help; transition: box-shadow 0.12s ease, filter 0.12s ease; }}
+#{component_id} tr[data-row-info].active, #{component_id} tr[data-link-id].active {{
+  box-shadow: inset 0 0 0 2px rgba(59, 130, 246, 0.75);
+  filter: brightness(1.03);
+}}
+#{component_id} .info-card {{
+  margin-top: 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 12px;
+}}
+#{component_id} .info-title {{
+  font-size: 13px;
+  color: #4b5563;
+  font-weight: 600;
+  margin-bottom: 6px;
+}}
+#{component_id} .info-body {{
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+  min-height: 120px;
+  max-height: 220px;
+  overflow-y: auto;
+}}
+</style>
+<div id="{component_id}">
+  <div class="tables">
+    <div>
+      <div class="table-title">{html.escape(left_title)}</div>
+      <div class="table-wrap">{left_content}</div>
+    </div>
+    <div>
+      <div class="table-title">{html.escape(right_title)}</div>
+      <div class="table-wrap">{right_content}</div>
+    </div>
+  </div>
+  <div class="info-card">
+    <div class="info-title">Chunk Detail</div>
+    <div class="info-body" id="{component_id}-info">{html.escape(default_info)}</div>
+  </div>
+</div>
+<script>
+(function() {{
+  const root = document.getElementById("{component_id}");
+  if (!root) return;
+  const infoBox = document.getElementById("{component_id}-info");
+  const defaultInfo = {json.dumps(default_info)};
+  function clearActive() {{
+    root.querySelectorAll("tr.active").forEach((el) => el.classList.remove("active"));
+  }}
+  root.querySelectorAll("tr[data-row-info]").forEach((el) => {{
+    el.addEventListener("mouseenter", () => {{
+      clearActive();
+      const linkId = el.getAttribute("data-link-id");
+      if (linkId) {{
+        root.querySelectorAll('tr[data-link-id="' + linkId + '"]').forEach((row) => row.classList.add("active"));
+      }} else {{
+        el.classList.add("active");
+      }}
+      if (infoBox) infoBox.textContent = el.getAttribute("data-row-info") || defaultInfo;
+    }});
+    el.addEventListener("mouseleave", () => {{
+      clearActive();
+    }});
+  }});
+}})();
+</script>
+""",
+        height=int(table_height_px) + 240,
+        scrolling=False,
     )
 
 
@@ -213,7 +495,7 @@ def normalize_token_id(token: dict[str, Any], fallback: int) -> int:
 
 
 def normalize_group_id(token: dict[str, Any], fallback: int) -> int:
-    return int(token.get("micro_chunk_id", normalize_token_id(token, fallback)) or fallback)
+    return int(token.get("micro_chunk_id", token.get("chunk_id", fallback)) or fallback)
 
 
 def _reward_value(token: dict[str, Any]) -> float:
@@ -282,7 +564,7 @@ def _build_prediction_tokens_html(
         return html.escape(safe_text), {}
 
     pieces: list[str] = []
-    info_by_token_id: dict[int, str] = {}
+    info_by_group_id: dict[int, str] = {}
     cursor = 0
     shown = token_rows[:max_tokens]
     for fallback_idx, token in enumerate(shown):
@@ -301,13 +583,12 @@ def _build_prediction_tokens_html(
             token_id,
             sample_gt_first_hit_rollout=sample_gt_first_hit_rollout,
         )
-        info_by_token_id[token_id] = info_text
+        info_by_group_id[group_id] = info_text
         pieces.append(
             "<span class='token-seg pred-seg"
-            f"{' bad-reward' if reward < 0.999999 else ''}"
             f"{' eos-seg' if bool(token.get('is_eos', False)) else ''}' "
             f"data-group-id='{group_id}' data-info='{html.escape(info_text, quote=True)}' "
-            f"title='{html.escape(info_text, quote=True)}' style='background:{token_color(group_id)}'>"
+            f"title='{html.escape(info_text, quote=True)}' style='background:{token_reward_color(reward)}'>"
             f"{html.escape(seg_text)}</span>"
         )
         cursor = max(cursor, end)
@@ -315,13 +596,13 @@ def _build_prediction_tokens_html(
         pieces.append(html.escape(safe_text[cursor:]))
     if len(token_rows) > len(shown):
         pieces.append(f"<br/><span class='truncated'>... only first {len(shown)} / {len(token_rows)} tokens shown</span>")
-    return "".join(pieces), info_by_token_id
+    return "".join(pieces), info_by_group_id
 
 
 def _build_gt_alignment_html(
     gt_text: str,
     token_rows: list[dict[str, Any]],
-    info_by_token_id: dict[int, str],
+    info_by_group_id: dict[int, str],
     *,
     max_tokens: int,
     sample_gt_first_hit_rollout: dict[int, int] | None = None,
@@ -347,8 +628,9 @@ def _build_gt_alignment_html(
                 "end": end_i,
                 "token_id": token_id,
                 "group_id": group_id,
-                "info": info_by_token_id.get(
-                    token_id,
+                "reward": _reward_value(token),
+                "info": info_by_group_id.get(
+                    group_id,
                     _token_info_text(
                         token,
                         token_id,
@@ -374,7 +656,7 @@ def _build_gt_alignment_html(
             f"data-group-id='{int(item['group_id'])}' "
             f"data-info='{html.escape(str(item['info']), quote=True)}' "
             f"title='{html.escape(str(item['info']), quote=True)}' "
-            f"style='background:{token_color(int(item['group_id']))}'>"
+            f"style='background:{token_reward_color(float(item['reward']))}'>"
             f"{html.escape(seg_text)}</span>"
         )
         cursor = end
@@ -391,7 +673,7 @@ def render_token_alignment_component(
     max_tokens: int = 512,
     sample_gt_first_hit_rollout: dict[int, int] | None = None,
 ) -> None:
-    pred_html, info_by_token_id = _build_prediction_tokens_html(
+    pred_html, info_by_group_id = _build_prediction_tokens_html(
         pred_text,
         token_rows,
         max_tokens=max_tokens,
@@ -400,7 +682,7 @@ def render_token_alignment_component(
     gt_html = _build_gt_alignment_html(
         gt_text,
         token_rows,
-        info_by_token_id,
+        info_by_group_id,
         max_tokens=max_tokens,
         sample_gt_first_hit_rollout=sample_gt_first_hit_rollout,
     )
@@ -417,6 +699,11 @@ def render_token_alignment_component(
   border: 1px solid #d9d9d9;
   border-radius: 10px;
   background: #ffffff;
+}}
+#{component_id} .token-grid {{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
   margin-bottom: 10px;
 }}
 #{component_id} .panel-title {{
@@ -429,8 +716,8 @@ def render_token_alignment_component(
   padding: 10px 12px 12px 12px;
   white-space: pre-wrap;
   overflow-y: auto;
-  min-height: 150px;
-  max-height: 230px;
+  min-height: 180px;
+  max-height: 260px;
   line-height: 1.55;
   font-size: 14px;
 }}
@@ -441,13 +728,12 @@ def render_token_alignment_component(
   border-radius: 4px;
   transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
 }}
-#{component_id} .pred-seg.bad-reward {{
-  color: #dc2626;
-  font-weight: 700;
-}}
 #{component_id} .pred-seg.eos-seg {{
   border: 1px dashed #4b5563;
   font-weight: 700;
+}}
+#{component_id} .token-seg {{
+  color: #111827;
 }}
 #{component_id} .token-seg.active {{
   transform: scale(1.12);
@@ -468,19 +754,25 @@ def render_token_alignment_component(
   font-size: 14px;
   line-height: 1.55;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-height: 160px;
+  max-height: 260px;
+  overflow-y: auto;
 }}
 #{component_id} .truncated {{
   color: #6b7280;
 }}
 </style>
 <div id="{component_id}">
-  <div class="token-panel">
-    <div class="panel-title">Prediction Tokens</div>
-    <div class="panel-content pred-content">{pred_html}</div>
-  </div>
-  <div class="token-panel">
-    <div class="panel-title">Ground Truth Aligned Spans</div>
-    <div class="panel-content gt-content">{gt_html}</div>
+  <div class="token-grid">
+    <div class="token-panel">
+      <div class="panel-title">Prediction Tokens</div>
+      <div class="panel-content pred-content">{pred_html}</div>
+    </div>
+    <div class="token-panel">
+      <div class="panel-title">Ground Truth Aligned Spans</div>
+      <div class="panel-content gt-content">{gt_html}</div>
+    </div>
   </div>
   <div class="token-info-card">
     <div class="panel-title">Token Detail</div>
@@ -505,20 +797,56 @@ def render_token_alignment_component(
     el.addEventListener("mouseenter", () => activateByGroupId(el.getAttribute("data-group-id"), el.getAttribute("data-info")));
     el.addEventListener("mouseleave", () => {{
       clearActive();
-      if (infoBox) infoBox.textContent = defaultInfo;
     }});
   }});
 }})();
 </script>
 """,
-        height=640,
-        scrolling=True,
+        height=560,
+        scrolling=False,
     )
 
 
-def render_formula_preview(title: str, source: str) -> None:
+def _highlight_source_by_mask(source: str, common_mask: list[bool] | None) -> str:
+    text = str(source or "")
+    if not common_mask:
+        return html.escape(text)
+    pieces: list[str] = []
+    for idx, char in enumerate(text):
+        safe_char = html.escape(char)
+        if idx < len(common_mask) and common_mask[idx]:
+            pieces.append(f"<span style='color:#16a34a;font-weight:700'>{safe_char}</span>")
+        else:
+            pieces.append(safe_char)
+    return "".join(pieces)
+
+
+def render_formula_preview(title: str, source: str, *, common_mask: list[bool] | None = None) -> None:
     st.markdown(f"**{title}**")
-    st.code(str(source or ""), language="latex")
+    safe_source = _highlight_source_by_mask(str(source or ""), common_mask)
+    st.markdown(
+        f"""
+<div style="
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fafc;
+  color: #111111;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: 240px;
+  line-height: 1.45;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+">{safe_source}</div>
+""",
+        unsafe_allow_html=True,
+    )
     cleaned = str(source or "").strip()
     if cleaned.startswith("\\[") and cleaned.endswith("\\]"):
         cleaned = cleaned[2:-2].strip()

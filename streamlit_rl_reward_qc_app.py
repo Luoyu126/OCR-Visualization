@@ -17,14 +17,12 @@ from io_utils import (
     stable_id,
 )
 from ui_renderers import (
-    PAIR_COLORS,
     advantage_color,
-    build_pair_color_maps,
     colorized_adv_html,
-    extract_matched_tr_pairs_from_chunks,
     format_table_source_with_tr_newlines,
     render_code_block,
     render_formula_preview,
+    render_interactive_table_pair_html,
     render_table_html,
     render_text_block,
     render_token_alignment_component,
@@ -32,8 +30,8 @@ from ui_renderers import (
 
 
 DEFAULT_RUN_ROOT = Path("/user/wangzhilue/algorithm/visualization-v1/runs")
-PAIR_LABELS = ["unmarked", "incorrect", "correct", "minor_error"]
-PAIR_LABEL_DISPLAY = {
+CASE_LABELS = ["unmarked", "incorrect", "correct", "minor_error"]
+CASE_LABEL_DISPLAY = {
     "unmarked": "未标注",
     "incorrect": "错误",
     "correct": "正确",
@@ -42,8 +40,8 @@ PAIR_LABEL_DISPLAY = {
 CHUNK_LABELS = ["unmarked", "correct", "incorrect"]
 
 
-def pair_label_text(label: str) -> str:
-    return PAIR_LABEL_DISPLAY.get(str(label), str(label))
+def case_label_text(label: str) -> str:
+    return CASE_LABEL_DISPLAY.get(str(label), str(label))
 
 
 def safe_float_or_none(value: Any) -> float | None:
@@ -197,17 +195,21 @@ def build_sample_views(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def load_annotations(run_dir: Path) -> dict[str, Any]:
-    payload = load_json(run_dir / "annotations_current.json", {"pair_annotations": {}, "chunk_annotations": {}})
+    payload = load_json(
+        run_dir / "annotations_current.json",
+        {"case_annotations": {}, "pair_annotations": {}, "chunk_annotations": {}},
+    )
     if not isinstance(payload, dict):
-        payload = {"pair_annotations": {}, "chunk_annotations": {}}
+        payload = {"case_annotations": {}, "pair_annotations": {}, "chunk_annotations": {}}
+    payload.setdefault("case_annotations", {})
     payload.setdefault("pair_annotations", {})
     payload.setdefault("chunk_annotations", {})
     return payload
 
 
-def save_pair_annotation(run_dir: Path, pair_id: str, label: str, note: str) -> None:
+def save_case_annotation(run_dir: Path, sample_id: str, label: str, note: str) -> None:
     annotations = load_annotations(run_dir)
-    annotations["pair_annotations"][pair_id] = {
+    annotations["case_annotations"][sample_id] = {
         "label": label,
         "note": note.strip(),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -216,8 +218,8 @@ def save_pair_annotation(run_dir: Path, pair_id: str, label: str, note: str) -> 
     append_jsonl(
         run_dir / "annotation_events.jsonl",
         {
-            "kind": "pair_annotation",
-            "pair_key": pair_id,
+            "kind": "case_annotation",
+            "sample_id": sample_id,
             "label": label,
             "note": note.strip(),
             "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -250,10 +252,10 @@ def save_chunk_annotations(run_dir: Path, updates: list[dict[str, Any]]) -> None
         )
 
 
-def get_pair_label(annotations: dict[str, Any], pair_id: str) -> str:
-    value = annotations.get("pair_annotations", {}).get(pair_id, {})
+def get_case_label(annotations: dict[str, Any], sample_id: str) -> str:
+    value = annotations.get("case_annotations", {}).get(sample_id, {})
     label = str(value.get("label", "unmarked"))
-    return label if label in PAIR_LABELS else "unmarked"
+    return label if label in CASE_LABELS else "unmarked"
 
 
 def get_chunk_label(annotations: dict[str, Any], chunk_id: str) -> str:
@@ -267,12 +269,12 @@ def get_chunk_note(annotations: dict[str, Any], chunk_id: str) -> str:
     return str(value.get("note", "")).strip()
 
 
-def summarize_pair_labels(pairs: list[dict[str, Any]], annotations: dict[str, Any]) -> dict[str, int]:
-    counts = {label: 0 for label in PAIR_LABELS}
-    for item in pairs:
-        label = get_pair_label(annotations, str(item.get("pair_key", "")))
+def summarize_case_labels(samples: list[dict[str, Any]], annotations: dict[str, Any]) -> dict[str, int]:
+    counts = {label: 0 for label in CASE_LABELS}
+    for item in samples:
+        label = get_case_label(annotations, str(item.get("sample_id", "")))
         counts[label] += 1
-    return {"total": len(pairs), **counts}
+    return {"total": len(samples), **counts}
 
 
 def format_ratio(numerator: int, denominator: int) -> str:
@@ -406,23 +408,117 @@ def chunk_label_from_checkboxes(correct_key: str, incorrect_key: str) -> str:
     return "unmarked"
 
 
-def render_pair_annotation_form(run_dir: Path, annotations: dict[str, Any], pair_item: dict[str, Any]) -> None:
-    pair_id = str(pair_item.get("pair_key", ""))
-    current_pair_annotation = annotations.get("pair_annotations", {}).get(pair_id, {})
-    current_pair_label = str(current_pair_annotation.get("label", "unmarked"))
-    current_pair_note = str(current_pair_annotation.get("note", ""))
-    with st.form(f"pair-form-{stable_id(pair_id)}"):
-        new_pair_label = st.selectbox(
-            "Pair reward 是否正确",
-            options=PAIR_LABELS,
-            index=PAIR_LABELS.index(current_pair_label) if current_pair_label in PAIR_LABELS else 0,
-            format_func=pair_label_text,
+def table_chunk_info_text(chunk: dict[str, Any], *, seq_adv: float) -> str:
+    chunk_adv = safe_float_or_none(chunk.get("chunk_normed_adv"))
+    chunk_adv_text = "N/A" if chunk_adv is None else f"{chunk_adv:+.4f}"
+    return (
+        f"Chunk #{int(chunk.get('chunk_id', 0) or 0)}\n"
+        f"reward: {safe_float(chunk.get('reward_raw', chunk.get('reward')), 0.0):.4f}\n"
+        f"chunk_adv: {chunk_adv_text}\n"
+        f"seq_adv: {seq_adv:+.4f}\n"
+        f"matching_reward: {chunk.get('matching_reward')}\n"
+        f"reward_source: {chunk.get('reward_source')}\n"
+        f"pred_tr_index: {chunk.get('pred_tr_index')}\n"
+        f"gt_chunk_id: {chunk.get('gt_chunk_id')}\n"
+        f"pred_tr_matched: {bool(chunk.get('pred_tr_matched', False))}\n"
+        f"token_start/token_end: {chunk.get('token_start')}:{chunk.get('token_end')}\n"
+        f"pred_chunk_text: {chunk.get('pred_chunk_text', '')}\n"
+        f"gt_chunk_text: {chunk.get('gt_chunk_text', '')}"
+    )
+
+
+def interpolate_rgb(start: tuple[int, int, int], end: tuple[int, int, int], ratio: float) -> str:
+    value = max(0.0, min(float(ratio), 1.0))
+    channels = [round(start_item + (end_item - start_item) * value) for start_item, end_item in zip(start, end, strict=True)]
+    return f"#{channels[0]:02x}{channels[1]:02x}{channels[2]:02x}"
+
+
+def table_chunk_adv_color(*, reward: float, chunk_adv: float | None) -> str:
+    adv = 0.0 if chunk_adv is None else float(chunk_adv)
+    if reward < 0.999999:
+        ratio = min(max(-adv, 0.0) / 2.0, 1.0)
+        return interpolate_rgb((254, 226, 226), (248, 113, 113), ratio)
+    ratio = min(max(adv, 0.0) / 2.0, 1.0)
+    return interpolate_rgb((220, 252, 231), (74, 222, 128), ratio)
+
+
+def build_table_hover_maps(chunks: list[dict[str, Any]], *, seq_adv: float) -> dict[str, dict[int, Any]]:
+    pred_info: dict[int, str] = {}
+    gt_info: dict[int, str] = {}
+    pred_bad: dict[int, bool] = {}
+    gt_bad: dict[int, bool] = {}
+    pred_color: dict[int, str] = {}
+    gt_color: dict[int, str] = {}
+    pred_link: dict[int, str] = {}
+    gt_link: dict[int, str] = {}
+    for chunk in chunks:
+        chunk_id = int(chunk.get("chunk_id", 0) or 0)
+        reward = safe_float(chunk.get("reward_raw", chunk.get("reward")), 0.0)
+        chunk_adv = safe_float_or_none(chunk.get("chunk_normed_adv"))
+        is_bad = reward < 0.999999
+        color = table_chunk_adv_color(reward=reward, chunk_adv=chunk_adv)
+        info_text = table_chunk_info_text(chunk, seq_adv=seq_adv)
+        pred_idx_raw = chunk.get("pred_tr_index")
+        gt_idx_raw = chunk.get("gt_chunk_id", chunk.get("chunk_id"))
+        try:
+            pred_idx = int(pred_idx_raw)
+        except Exception:
+            pred_idx = -1
+        try:
+            gt_idx = int(gt_idx_raw)
+        except Exception:
+            gt_idx = -1
+        if pred_idx >= 0:
+            pred_info[pred_idx] = info_text
+            pred_bad[pred_idx] = is_bad
+            pred_color[pred_idx] = color
+            pred_link[pred_idx] = f"chunk-{chunk_id}"
+        if gt_idx >= 0:
+            gt_info[gt_idx] = info_text
+            gt_bad[gt_idx] = is_bad
+            gt_color[gt_idx] = color
+            gt_link[gt_idx] = f"chunk-{chunk_id}"
+    return {
+        "pred_info": pred_info,
+        "gt_info": gt_info,
+        "pred_bad": pred_bad,
+        "gt_bad": gt_bad,
+        "pred_color": pred_color,
+        "gt_color": gt_color,
+        "pred_link": pred_link,
+        "gt_link": gt_link,
+    }
+
+
+def build_formula_common_mask(gt_formula: str, predictions: list[str]) -> list[bool]:
+    if not predictions:
+        return []
+    gt_text = str(gt_formula or "")
+    out: list[bool] = []
+    for idx, char in enumerate(gt_text):
+        out.append(all(idx < len(prediction) and prediction[idx] == char for prediction in predictions))
+    return out
+
+
+def render_case_annotation_form(run_dir: Path, annotations: dict[str, Any], sample_view: dict[str, Any]) -> None:
+    sample_id = str(sample_view.get("sample_id", ""))
+    current_annotation = annotations.get("case_annotations", {}).get(sample_id, {})
+    current_label = str(current_annotation.get("label", "unmarked"))
+    current_note = str(current_annotation.get("note", ""))
+    st.markdown("---")
+    st.markdown("### Case 级标注")
+    with st.form(f"case-form-{stable_id(sample_id)}"):
+        new_label = st.selectbox(
+            "当前 case 奖励是否正确",
+            options=CASE_LABELS,
+            index=CASE_LABELS.index(current_label) if current_label in CASE_LABELS else 0,
+            format_func=case_label_text,
         )
-        new_pair_note = st.text_input("备注（可选）", value=current_pair_note)
-        submitted = st.form_submit_button("保存 Pair 标注")
+        new_note = st.text_input("备注（可选）", value=current_note)
+        submitted = st.form_submit_button("保存 Case 标注")
     if submitted:
-        save_pair_annotation(run_dir, pair_id, new_pair_label, new_pair_note)
-        st.success("Pair annotation saved.")
+        save_case_annotation(run_dir, sample_id, new_label, new_note)
+        st.success("Case annotation saved.")
         st.rerun()
 
 
@@ -467,7 +563,7 @@ def render_text_sample(
         m5.metric("Token Std", f"{safe_float(pair_item.get('sample_token_reward_std', pair_item.get('reward_std')), 0.0):.4f}")
 
         render_text_block("Prediction", prediction_text, height_px=150)
-        st.markdown("#### Token 级颜色映射（hover 查看奖励信息）")
+        st.markdown("#### Token 级映射（hover 查看奖励信息）")
         render_token_alignment_component(
             prediction_text,
             gt_text,
@@ -477,9 +573,6 @@ def render_text_sample(
         )
         with st.expander(f"Token rows r{response_index:02d}", expanded=False):
             st.dataframe(list(pair_item.get("chunks", [])), use_container_width=True)
-
-        st.markdown("#### Pair 级标注")
-        render_pair_annotation_form(run_dir, annotations, pair_item)
 
 
 def render_table_pair_chunks(
@@ -594,8 +687,7 @@ def render_table_sample(
         seq_reward = safe_float(seq_row.get("final_reward", pair_item.get("seq_final_reward")), 0.0)
         seq_adv = safe_float(seq_row.get("adv", pair_item.get("seq_adv")), 0.0)
         chunks = list(pair_item.get("chunks", []))
-        matched_pairs = extract_matched_tr_pairs_from_chunks(chunks)
-        color_maps = build_pair_color_maps(matched_pairs)
+        hover_maps = build_table_hover_maps(chunks, seq_adv=seq_adv)
 
         st.markdown("---")
         st.markdown(
@@ -608,37 +700,28 @@ def render_table_sample(
         m3.metric("Mean Chunk Reward", f"{safe_float(pair_item.get('mean_chunk_reward'), 0.0):.4f}")
         m4.metric("Reward Std", f"{safe_float(pair_item.get('reward_std'), 0.0):.4f}")
 
+        render_interactive_table_pair_html(
+            left_title="Ground Truth Table",
+            left_table_html=gt_table,
+            right_title="Prediction Table",
+            right_table_html=prediction_text,
+            left_row_color_map=hover_maps["gt_color"],
+            right_row_color_map=hover_maps["pred_color"],
+            left_row_info_map=hover_maps["gt_info"],
+            right_row_info_map=hover_maps["pred_info"],
+            left_row_bad_reward_map=hover_maps["gt_bad"],
+            right_row_bad_reward_map=hover_maps["pred_bad"],
+            left_row_link_map=hover_maps["gt_link"],
+            right_row_link_map=hover_maps["pred_link"],
+        )
         tleft, tright = st.columns(2)
         with tleft:
-            render_table_html("Ground Truth Table", gt_table, row_color_map=color_maps["gt_colors"])
             render_code_block("Ground Truth Source", format_table_source_with_tr_newlines(gt_table), language="html")
         with tright:
-            render_table_html("Prediction Table", prediction_text, row_color_map=color_maps["pred_colors"])
             render_code_block("Prediction Source", format_table_source_with_tr_newlines(prediction_text), language="html")
 
-        if matched_pairs:
-            legend_items: list[str] = []
-            for pair_idx, pair in enumerate(matched_pairs):
-                pred_idx, gt_idx = int(pair[0]), int(pair[1])
-                color = PAIR_COLORS[pair_idx % len(PAIR_COLORS)]
-                legend_items.append(
-                    f"<span style='display:inline-block;width:12px;height:12px;background:{color};"
-                    "border:1px solid #9ca3af;margin-right:4px;vertical-align:middle;'></span>"
-                    f"pred tr {pred_idx} ↔ gt tr {gt_idx}"
-                )
-            st.markdown("**Matched tr Color Legend**", unsafe_allow_html=True)
-            st.markdown("<br/>".join(legend_items), unsafe_allow_html=True)
-
-        st.markdown("#### Chunk 细节（按 prediction/jsonl 顺序）")
-        render_table_pair_chunks(
-            run_dir=run_dir,
-            annotations=annotations,
-            pair_item=pair_item,
-            seq_adv=seq_adv,
-        )
-
-        st.markdown("#### Pair 级标注")
-        render_pair_annotation_form(run_dir, annotations, pair_item)
+        with st.expander(f"Raw chunk rows r{response_index:02d}", expanded=False):
+            st.dataframe(chunks, use_container_width=True)
 
 
 def render_formula_sample(
@@ -650,6 +733,11 @@ def render_formula_sample(
     sample = sample_view.get("sample", {})
     gt_formula = str(sample.get("ground_truth", ""))
     seq_by_resp = sequence_row_by_response(sample_view)
+    rollout_predictions = [
+        str(pair_item.get("prediction", {}).get("response_text", pair_item.get("response_text", "")))
+        for pair_item in sample_view.get("pairs", [])
+    ]
+    common_mask = build_formula_common_mask(gt_formula, rollout_predictions)
 
     for pair_item in sample_view.get("pairs", []):
         response_index = int(pair_item.get("response_index", 0))
@@ -674,18 +762,14 @@ def render_formula_sample(
 
         c1, c2 = st.columns(2)
         with c1:
-            render_formula_preview("Ground Truth（源码 + 渲染）", gt_formula)
+            render_formula_preview("Ground Truth（源码 + 渲染）", gt_formula, common_mask=common_mask)
         with c2:
-            render_formula_preview("Prediction（源码 + 渲染）", prediction_text)
-
-        st.markdown("#### Pair 级标注")
-        render_pair_annotation_form(run_dir, annotations, pair_item)
+            render_formula_preview("Prediction（源码 + 渲染）", prediction_text, common_mask=common_mask)
 
 
 def render_sample_header(sample_view: dict[str, Any], run_dir: Path) -> None:
     sample = sample_view.get("sample", {})
     sample_id = str(sample_view.get("sample_id", ""))
-    task_type = str(sample_view.get("task_type", ""))
     prompt_text = str(
         sample.get("prompt_text")
         or sample_view.get("pairs", [{}])[0].get("prompt_text")
@@ -694,7 +778,7 @@ def render_sample_header(sample_view: dict[str, Any], run_dir: Path) -> None:
     )
     image_path = resolve_sample_image_path(sample, run_dir, sample_id)
 
-    st.subheader(f"Sample: `{sample_id}` | task_type=`{task_type}`")
+    st.markdown("### 当前样本图片与 Prompt")
     left, right = st.columns([1, 2])
     with left:
         if image_path is not None:
@@ -761,11 +845,11 @@ def main() -> None:
         st.header("Filters")
         task_type_filter = st.selectbox("Task type", options=["all", "text", "table", "formula"], index=0)
         sample_filter = st.text_input("Sample ID contains", value="")
-        pair_status_filter = st.selectbox(
-            "Pair annotation status",
-            options=["all", *PAIR_LABELS],
+        case_status_filter = st.selectbox(
+            "Case annotation status",
+            options=["all", *CASE_LABELS],
             index=0,
-            format_func=lambda value: "全部" if value == "all" else pair_label_text(value),
+            format_func=lambda value: "全部" if value == "all" else case_label_text(value),
         )
         max_tokens = st.number_input("Max tokens to render (text)", min_value=32, max_value=4096, value=512, step=32)
 
@@ -775,21 +859,20 @@ def main() -> None:
     if sample_filter.strip():
         needle = sample_filter.strip()
         visible_samples = [item for item in visible_samples if needle in str(item.get("sample_id", ""))]
-    if pair_status_filter != "all":
+    if case_status_filter != "all":
         visible_samples = [
             item
             for item in visible_samples
-            if any(get_pair_label(annotations, str(pair.get("pair_key", ""))) == pair_status_filter for pair in item.get("pairs", []))
+            if get_case_label(annotations, str(item.get("sample_id", ""))) == case_status_filter
         ]
 
-    visible_pairs = [pair for sample in visible_samples for pair in sample.get("pairs", [])]
-    pair_stats = summarize_pair_labels(visible_pairs, annotations)
+    case_stats = summarize_case_labels(visible_samples, annotations)
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Pair 总数", f"{pair_stats['total']}")
-    m2.metric("未标注", f"{pair_stats['unmarked']}", format_ratio(pair_stats["unmarked"], pair_stats["total"]))
-    m3.metric("错误", f"{pair_stats['incorrect']}", format_ratio(pair_stats["incorrect"], pair_stats["total"]))
-    m4.metric("正确", f"{pair_stats['correct']}", format_ratio(pair_stats["correct"], pair_stats["total"]))
-    m5.metric("轻微错误", f"{pair_stats['minor_error']}", format_ratio(pair_stats["minor_error"], pair_stats["total"]))
+    m1.metric("Case 总数", f"{case_stats['total']}")
+    m2.metric("未标注", f"{case_stats['unmarked']}", format_ratio(case_stats["unmarked"], case_stats["total"]))
+    m3.metric("错误", f"{case_stats['incorrect']}", format_ratio(case_stats["incorrect"], case_stats["total"]))
+    m4.metric("正确", f"{case_stats['correct']}", format_ratio(case_stats["correct"], case_stats["total"]))
+    m5.metric("轻微错误", f"{case_stats['minor_error']}", format_ratio(case_stats["minor_error"], case_stats["total"]))
 
     if not visible_samples:
         st.warning("No samples match current filters.")
@@ -797,7 +880,7 @@ def main() -> None:
             st.json(metadata)
         return
 
-    scope_key = stable_id(f"{selected_run}|{task_type_filter}|{sample_filter.strip()}|{pair_status_filter}")
+    scope_key = stable_id(f"{selected_run}|{task_type_filter}|{sample_filter.strip()}|{case_status_filter}")
     sample_select_key = f"sample-select-{scope_key}"
     st.session_state.setdefault(sample_select_key, 0)
     st.session_state[sample_select_key] = max(
@@ -832,8 +915,9 @@ def main() -> None:
         )
 
     current_sample = visible_samples[int(selected_sample_index)]
-    render_sample_header(current_sample, run_dir)
+    st.subheader(f"Sample: `{current_sample.get('sample_id', '')}` | task_type=`{current_sample.get('task_type', '')}`")
     render_sequence_overview(current_sample)
+    render_sample_header(current_sample, run_dir)
 
     task_type = str(current_sample.get("task_type", ""))
     if task_type == "text":
@@ -859,6 +943,8 @@ def main() -> None:
     else:
         st.warning(f"Unsupported task_type: {task_type}")
         st.dataframe(current_sample.get("pairs", []), use_container_width=True)
+
+    render_case_annotation_form(run_dir, annotations, current_sample)
 
     with st.expander("Run metadata", expanded=False):
         st.json(metadata)
