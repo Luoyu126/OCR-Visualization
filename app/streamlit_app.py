@@ -6,7 +6,7 @@ from typing import Any
 
 import streamlit as st
 
-from io_utils import (
+from ocr_viz.io_utils import (
     append_jsonl,
     chunk_key,
     discover_runs,
@@ -16,7 +16,7 @@ from io_utils import (
     save_json,
     stable_id,
 )
-from ui_renderers import (
+from ocr_viz.ui_renderers import (
     advantage_color,
     colorized_adv_html,
     format_table_source_with_tr_newlines,
@@ -26,6 +26,7 @@ from ui_renderers import (
     render_table_html,
     render_text_block,
     render_token_alignment_component,
+    reward_hover_text,
 )
 
 
@@ -413,7 +414,7 @@ def table_chunk_info_text(chunk: dict[str, Any], *, seq_adv: float) -> str:
     chunk_adv_text = "N/A" if chunk_adv is None else f"{chunk_adv:+.4f}"
     return (
         f"Chunk #{int(chunk.get('chunk_id', 0) or 0)}\n"
-        f"reward: {safe_float(chunk.get('reward_raw', chunk.get('reward')), 0.0):.4f}\n"
+        f"reward: {reward_hover_text(chunk)}\n"
         f"chunk_adv: {chunk_adv_text}\n"
         f"seq_adv: {seq_adv:+.4f}\n"
         f"matching_reward: {chunk.get('matching_reward')}\n"
@@ -915,7 +916,7 @@ def main() -> None:
         )
 
     current_sample = visible_samples[int(selected_sample_index)]
-    st.subheader(f"Sample: `{current_sample.get('sample_id', '')}` | task_type=`{current_sample.get('task_type', '')}`")
+    st.subheader(f"task_type: {current_sample.get('task_type', '')}")
     render_sequence_overview(current_sample)
     render_sample_header(current_sample, run_dir)
 

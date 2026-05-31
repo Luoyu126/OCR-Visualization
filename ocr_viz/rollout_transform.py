@@ -6,7 +6,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from io_utils import pair_key
+from ocr_viz.io_utils import pair_key
 
 
 STEP_FILE_PATTERN = re.compile(r"^global_step_(\d+)_results\.jsonl$")
@@ -338,6 +338,16 @@ def _build_chunks_for_response(
             "token_adv": _safe_float_or_none(token_item.get("advantage")),
             "token_level_score": _safe_float_or_none(token_item.get("token_level_score")),
             "token_level_reward": _safe_float_or_none(token_item.get("token_level_reward")),
+            "norm_text": (
+                str(chunk_item.get("norm_text"))
+                if chunk_item.get("norm_text") is not None
+                else (
+                    str(pred_item.get("norm_text"))
+                    if pred_item.get("norm_text") is not None
+                    else None
+                )
+            ),
+            "masked": bool(chunk_item.get("masked", False) or pred_item.get("masked", False)),
             "matched_gt_token_indices": [int(_safe_int(gt_chunk_id, chunk_id))],
             "attributed_gt_token_indices": [int(_safe_int(gt_chunk_id, chunk_id))],
             "inserted_gt_token_indices": [],

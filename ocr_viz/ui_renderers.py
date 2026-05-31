@@ -9,7 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from lxml import etree, html as lxml_html
 
-from io_utils import stable_id
+from ocr_viz.io_utils import stable_id
 
 
 PAIR_COLORS = [
@@ -502,6 +502,23 @@ def _reward_value(token: dict[str, Any]) -> float:
     return float(token.get("reward_raw", token.get("reward", 0.0)) or 0.0)
 
 
+def is_masked_empty_reward_token(token: dict[str, Any]) -> bool:
+    if bool(token.get("is_eos", False)):
+        return False
+    if bool(token.get("masked", False)):
+        return True
+    norm_text = token.get("norm_text")
+    if norm_text is not None:
+        return str(norm_text) == ""
+    return str(token.get("reward_source", "")) == "masked_empty_token"
+
+
+def reward_hover_text(token: dict[str, Any]) -> str:
+    if is_masked_empty_reward_token(token):
+        return "masked"
+    return f"{_reward_value(token):.4f}"
+
+
 def _format_earliest_gt_rollout(
     token: dict[str, Any],
     sample_gt_first_hit_rollout: dict[int, int] | None,
@@ -526,17 +543,18 @@ def _token_info_text(
     *,
     sample_gt_first_hit_rollout: dict[int, int] | None = None,
 ) -> str:
-    reward = _reward_value(token)
     token_adv = token.get("token_adv")
     token_adv_text = "N/A" if token_adv is None else f"{float(token_adv):+.4f}"
     earliest_rollout = _format_earliest_gt_rollout(token, sample_gt_first_hit_rollout)
+    norm_text = token.get("norm_text")
+    norm_text_line = "" if norm_text is None else f"\nnorm_text: {norm_text!r}"
     return (
         f"Token #{token_id}\n"
         f"chunk_type: {token.get('chunk_type', '')}\n"
         f"is_eos: {bool(token.get('is_eos', False))}\n"
         f"token_text: {token.get('token_text', token.get('pred_chunk_text', ''))}\n"
-        f"gt_text: {token.get('gt_text', token.get('gt_chunk_text', ''))}\n"
-        f"reward: {reward:.4f}\n"
+        f"gt_text: {token.get('gt_text', token.get('gt_chunk_text', ''))}{norm_text_line}\n"
+        f"reward: {reward_hover_text(token)}\n"
         f"token_adv: {token_adv_text}\n"
         f"chunk_normed_adv: {token.get('chunk_normed_adv')}\n"
         f"E_k: {int(token.get('E_k', 0) or 0)}\n"

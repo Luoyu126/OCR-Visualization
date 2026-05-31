@@ -7,8 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from io_utils import save_json, write_jsonl
-from rollout_transform import (
+from ocr_viz.io_utils import save_json, write_jsonl
+from ocr_viz.rollout_transform import (
     discover_step_files,
     load_rollout_jsonl,
     select_step_files,
@@ -85,7 +85,7 @@ def main() -> None:
     lookup = None
     if not args.skip_image_lookup:
         try:
-            from dataset_lookup import DatasetLookup
+            from ocr_viz.dataset_lookup import DatasetLookup
         except ImportError as exc:
             raise ImportError(
                 "Image lookup requires `pyarrow` and `Pillow`. "
