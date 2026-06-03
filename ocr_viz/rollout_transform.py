@@ -12,6 +12,14 @@ from ocr_viz.io_utils import pair_key
 STEP_FILE_PATTERN = re.compile(r"^global_step_(\d+)_results\.jsonl$")
 
 
+def _first_present(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if value is not None:
+            return value
+    return None
+
+
 def parse_step_from_filename(path: Path) -> int | None:
     match = STEP_FILE_PATTERN.match(path.name)
     if not match:
@@ -455,12 +463,36 @@ def transform_step_rows(
         task_type = _normalize_task_type(first.get("task_type", first.get("category")))
         prompt_text = _extract_prompt_text(str(first.get("prompt", "")))
         ground_truth = str(first.get("ground_truth", ""))
-        source_parquet = first.get("source_parquet")
-        source_row_idx_raw = first.get("source_row_idx")
-        source_block_idx_raw = (
-            first.get("source_block_idx")
-            if first.get("source_block_idx") is not None
-            else first.get("block_idx")
+        source_parquet = _first_present(
+            first,
+            (
+                "source_parquet",
+                "parquet_id",
+                "parquet_path",
+                "parquet_file",
+                "orig_source",
+            ),
+        )
+        source_row_idx_raw = _first_present(
+            first,
+            (
+                "source_row_idx",
+                "source_row_index",
+                "row_index",
+                "row_idx",
+                "orig_index",
+            ),
+        )
+        source_block_idx_raw = _first_present(
+            first,
+            (
+                "source_block_idx",
+                "source_block_index",
+                "block_idx",
+                "block_index",
+                "orig_block_idx",
+                "orig_block_index",
+            ),
         )
         source_row_idx = _safe_int(source_row_idx_raw, default=-1) if source_row_idx_raw is not None else None
         source_block_idx = _safe_int(source_block_idx_raw, default=-1) if source_block_idx_raw is not None else None

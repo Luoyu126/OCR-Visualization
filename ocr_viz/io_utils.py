@@ -52,18 +52,41 @@ def stable_id(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
-def discover_runs(run_root_str: str) -> list[str]:
+_RUN_MARKER_FILES = ("metadata.json", "samples.jsonl", "predictions.jsonl", "pair_summary.jsonl")
+
+
+def _is_run_directory(path: Path) -> bool:
+    return path.is_dir() and all((path / name).exists() for name in _RUN_MARKER_FILES)
+
+
+def discover_runs(run_root_str: str, *, max_depth: int = 3) -> list[str]:
+    """Find run directories under run_root, including one nested level (e.g. runs/formula_token_passk/<run>)."""
     run_root = Path(run_root_str)
     if not run_root.exists():
         return []
-    candidates = [
-        p
-        for p in run_root.iterdir()
-        if p.is_dir()
-        and (p / "metadata.json").exists()
-        and (p / "samples.jsonl").exists()
-        and (p / "predictions.jsonl").exists()
-        and (p / "pair_summary.jsonl").exists()
-    ]
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return [str(item) for item in candidates]
+
+    candidates: list[Path] = []
+    if _is_run_directory(run_root):
+        candidates.append(run_root)
+
+    def _walk(base: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        try:
+            children = sorted(base.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return
+        for child in children:
+            if not child.is_dir():
+                continue
+            if _is_run_directory(child):
+                candidates.append(child)
+            else:
+                _walk(child, depth + 1)
+
+    _walk(run_root, 0)
+    unique: dict[str, Path] = {}
+    for path in candidates:
+        unique[str(path.resolve())] = path
+    ordered = sorted(unique.values(), key=lambda p: p.stat().st_mtime, reverse=True)
+    return [str(item) for item in ordered]

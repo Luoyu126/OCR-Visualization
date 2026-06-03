@@ -548,6 +548,10 @@ def _token_info_text(
     earliest_rollout = _format_earliest_gt_rollout(token, sample_gt_first_hit_rollout)
     norm_text = token.get("norm_text")
     norm_text_line = "" if norm_text is None else f"\nnorm_text: {norm_text!r}"
+    extreme_line = ""
+    if bool(token.get("is_extreme_token")):
+        side = str(token.get("extreme_adv_side") or "extreme")
+        extreme_line = f"\n⚠ extreme_adv: {side} tail"
     return (
         f"Token #{token_id}\n"
         f"chunk_type: {token.get('chunk_type', '')}\n"
@@ -556,7 +560,7 @@ def _token_info_text(
         f"gt_text: {token.get('gt_text', token.get('gt_chunk_text', ''))}{norm_text_line}\n"
         f"reward: {reward_hover_text(token)}\n"
         f"token_adv: {token_adv_text}\n"
-        f"chunk_normed_adv: {token.get('chunk_normed_adv')}\n"
+        f"chunk_normed_adv: {token.get('chunk_normed_adv')}{extreme_line}\n"
         f"E_k: {int(token.get('E_k', 0) or 0)}\n"
         f"L_k: {int(token.get('L_k', 0) or 0)}\n"
         f"P_k: {int(token.get('P_k', 0) or 0)}\n"
@@ -576,6 +580,8 @@ def _build_prediction_tokens_html(
     *,
     max_tokens: int,
     sample_gt_first_hit_rollout: dict[int, int] | None = None,
+    highlight_extreme_adv: bool = False,
+    dim_non_extreme: bool = False,
 ) -> tuple[str, dict[int, str]]:
     safe_text = str(pred_text or "")
     if not token_rows:
@@ -602,11 +608,26 @@ def _build_prediction_tokens_html(
             sample_gt_first_hit_rollout=sample_gt_first_hit_rollout,
         )
         info_by_group_id[group_id] = info_text
+        extra_class = ""
+        extra_style = ""
+        if bool(token.get("is_extreme_token")):
+            side = str(token.get("extreme_adv_side") or "high")
+            extra_class = f" extreme-adv extreme-adv-{side}"
+            if highlight_extreme_adv:
+                outline = "#dc2626" if side == "low" else "#f59e0b"
+                extra_style = (
+                    f"outline:2px solid {outline};"
+                    f"box-shadow:0 0 0 2px {outline}55;"
+                    f"font-weight:700;"
+                )
+        elif dim_non_extreme:
+            extra_class = " dim-token"
+            extra_style = "opacity:0.35;"
         pieces.append(
             "<span class='token-seg pred-seg"
-            f"{' eos-seg' if bool(token.get('is_eos', False)) else ''}' "
+            f"{' eos-seg' if bool(token.get('is_eos', False)) else ''}{extra_class}' "
             f"data-group-id='{group_id}' data-info='{html.escape(info_text, quote=True)}' "
-            f"title='{html.escape(info_text, quote=True)}' style='background:{token_reward_color(reward)}'>"
+            f"title='{html.escape(info_text, quote=True)}' style='background:{token_reward_color(reward)};{extra_style}'>"
             f"{html.escape(seg_text)}</span>"
         )
         cursor = max(cursor, end)
@@ -624,6 +645,8 @@ def _build_gt_alignment_html(
     *,
     max_tokens: int,
     sample_gt_first_hit_rollout: dict[int, int] | None = None,
+    highlight_extreme_adv: bool = False,
+    dim_non_extreme: bool = False,
 ) -> str:
     safe_text = str(gt_text or "")
     if not token_rows:
@@ -647,6 +670,8 @@ def _build_gt_alignment_html(
                 "token_id": token_id,
                 "group_id": group_id,
                 "reward": _reward_value(token),
+                "is_extreme_token": bool(token.get("is_extreme_token")),
+                "extreme_adv_side": token.get("extreme_adv_side"),
                 "info": info_by_group_id.get(
                     group_id,
                     _token_info_text(
@@ -669,12 +694,28 @@ def _build_gt_alignment_html(
         if start > cursor:
             pieces.append(html.escape(safe_text[cursor:start]))
         seg_text = safe_text[start:end]
+        extra_class = ""
+        extra_style = ""
+        if bool(item.get("is_extreme_token")):
+            side = str(item.get("extreme_adv_side") or "high")
+            extra_class = f" extreme-adv extreme-adv-{side}"
+            if highlight_extreme_adv:
+                outline = "#dc2626" if side == "low" else "#f59e0b"
+                extra_style = (
+                    f"outline:2px solid {outline};"
+                    f"box-shadow:0 0 0 2px {outline}55;"
+                    f"font-weight:700;"
+                )
+        elif dim_non_extreme:
+            extra_class = " dim-token"
+            extra_style = "opacity:0.35;"
         pieces.append(
-            "<span class='token-seg gt-seg' "
+            "<span class='token-seg gt-seg"
+            f"{extra_class}' "
             f"data-group-id='{int(item['group_id'])}' "
             f"data-info='{html.escape(str(item['info']), quote=True)}' "
             f"title='{html.escape(str(item['info']), quote=True)}' "
-            f"style='background:{token_reward_color(float(item['reward']))}'>"
+            f"style='background:{token_reward_color(float(item['reward']))};{extra_style}'>"
             f"{html.escape(seg_text)}</span>"
         )
         cursor = end
@@ -690,12 +731,19 @@ def render_token_alignment_component(
     *,
     max_tokens: int = 512,
     sample_gt_first_hit_rollout: dict[int, int] | None = None,
+    highlight_extreme_adv: bool = False,
+    dim_non_extreme: bool = False,
+    focus_extreme_only: bool = False,
 ) -> None:
+    show_extreme = highlight_extreme_adv or focus_extreme_only
+    dim_others = dim_non_extreme or focus_extreme_only
     pred_html, info_by_group_id = _build_prediction_tokens_html(
         pred_text,
         token_rows,
         max_tokens=max_tokens,
         sample_gt_first_hit_rollout=sample_gt_first_hit_rollout,
+        highlight_extreme_adv=show_extreme,
+        dim_non_extreme=dim_others,
     )
     gt_html = _build_gt_alignment_html(
         gt_text,
@@ -703,6 +751,8 @@ def render_token_alignment_component(
         info_by_group_id,
         max_tokens=max_tokens,
         sample_gt_first_hit_rollout=sample_gt_first_hit_rollout,
+        highlight_extreme_adv=show_extreme,
+        dim_non_extreme=dim_others,
     )
     default_info = "Hover a token to inspect reward details."
     component_id = f"token-alignment-{stable_id(pred_text[:1000] + gt_text[:1000] + str(len(token_rows)))}"
@@ -779,6 +829,15 @@ def render_token_alignment_component(
 }}
 #{component_id} .truncated {{
   color: #6b7280;
+}}
+#{component_id} .extreme-adv-low {{
+  outline: 2px solid #dc2626;
+}}
+#{component_id} .extreme-adv-high {{
+  outline: 2px solid #f59e0b;
+}}
+#{component_id} .dim-token {{
+  opacity: 0.35;
 }}
 </style>
 <div id="{component_id}">
@@ -877,3 +936,317 @@ def render_formula_preview(title: str, source: str, *, common_mask: list[bool] |
         st.latex(cleaned)
     except Exception:
         st.info("Formula render failed; showing source only.")
+
+
+def _formula_gt_color_map(element_chunks: list[dict[str, Any]]) -> dict[int, str]:
+    color_by_gt: dict[int, str] = {}
+    for chunk in element_chunks:
+        gt_id = chunk.get("matched_gt_chunk_id", chunk.get("gt_chunk_id"))
+        if gt_id is None or int(gt_id) < 0:
+            continue
+        gt_id = int(gt_id)
+        if gt_id not in color_by_gt:
+            color_by_gt[gt_id] = PAIR_COLORS[len(color_by_gt) % len(PAIR_COLORS)]
+    return color_by_gt
+
+
+def _locate_gt_spans_for_formula(gt_text: str, element_chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    gt_text = str(gt_text or "")
+    spans: list[dict[str, Any]] = []
+    chunk_by_gt_id: dict[int, dict[str, Any]] = {}
+    for chunk in element_chunks:
+        if bool(chunk.get("is_fallback", False)):
+            continue
+        gt_id = chunk.get("matched_gt_chunk_id", chunk.get("gt_chunk_id"))
+        if gt_id is None or int(gt_id) < 0:
+            continue
+        gt_id_int = int(gt_id)
+        current = chunk_by_gt_id.get(gt_id_int)
+        current_reward = float(current.get("reward_raw", current.get("reward", 0.0)) or 0.0) if current else -1.0
+        reward = float(chunk.get("reward_raw", chunk.get("reward", 0.0)) or 0.0)
+        if current is None or reward > current_reward:
+            chunk_by_gt_id[gt_id_int] = chunk
+
+    search_from = 0
+    for gt_id, chunk in sorted(chunk_by_gt_id.items()):
+        token = str(chunk.get("gt_chunk_text", chunk.get("gt_text", chunk.get("pred_chunk_text", ""))) or "")
+        start = gt_text.find(token, search_from) if token else -1
+        if start < 0:
+            start = gt_text.find(token) if token else -1
+        if start < 0:
+            continue
+        end = start + len(token)
+        if end <= start:
+            continue
+        if start >= search_from:
+            search_from = end
+        else:
+            search_from = max(search_from, end)
+        spans.append(
+            {
+                "gt_id": int(gt_id),
+                "start": int(start),
+                "end": int(end),
+                "reward": float(chunk.get("reward_raw", chunk.get("reward", 0.0)) or 0.0),
+                "adv": float(chunk.get("adv", chunk.get("token_adv", chunk.get("chunk_normed_adv", 0.0))) or 0.0),
+                "is_fallback": False,
+                "is_extreme_token": bool(chunk.get("is_extreme_token")),
+                "extreme_adv_side": chunk.get("extreme_adv_side"),
+                "adv_source": str(chunk.get("adv_source", "case_element_normed_adv")),
+            }
+        )
+    return spans
+
+
+def _build_formula_pred_spans(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    spans: list[dict[str, Any]] = []
+    for chunk in chunks:
+        start = int(chunk.get("start_char", chunk.get("pred_char_start", 0)) or 0)
+        end = int(chunk.get("end_char", chunk.get("pred_char_end", start)) or start)
+        gt_id = chunk.get("matched_gt_chunk_id", chunk.get("gt_chunk_id"))
+        spans.append(
+            {
+                "gt_id": int(gt_id) if gt_id is not None and int(gt_id) >= 0 else -1,
+                "start": start,
+                "end": end,
+                "reward": float(chunk.get("reward_raw", chunk.get("reward", 0.0)) or 0.0),
+                "adv": float(chunk.get("adv", chunk.get("token_adv", 0.0)) or 0.0),
+                "is_fallback": bool(chunk.get("is_fallback", False)),
+                "is_extreme_token": bool(chunk.get("is_extreme_token")),
+                "extreme_adv_side": chunk.get("extreme_adv_side"),
+                "adv_source": str(chunk.get("adv_source", "")),
+                "chunk_type": str(chunk.get("chunk_type", "") or ""),
+                "reward_source": str(chunk.get("reward_source", "") or ""),
+            }
+        )
+    return spans
+
+
+def _highlight_formula_token_source(
+    source: str,
+    spans: list[dict[str, Any]],
+    *,
+    color_by_gt: dict[int, str],
+    side: str,
+    highlight_extreme_adv: bool = False,
+    dim_non_extreme: bool = False,
+) -> str:
+    source = str(source or "")
+    if not spans:
+        return html.escape(source)
+
+    ordered = sorted(spans, key=lambda item: (int(item["start"]), int(item["end"])))
+    pieces: list[str] = []
+    cursor = 0
+    for item in ordered:
+        start = max(cursor, int(item["start"]))
+        end = max(start, min(int(item["end"]), len(source)))
+        if start > cursor:
+            pieces.append(html.escape(source[cursor:start]))
+        if end <= start:
+            continue
+        gt_id = int(item.get("gt_id", -1))
+        is_fallback = bool(item.get("is_fallback", False))
+        if is_fallback:
+            style = "background:#f3f4f6;border-bottom:2px dashed #9ca3af;"
+            label = "未实际打分 | chunk-sequence fallback"
+        else:
+            color = color_by_gt.get(gt_id, token_reward_color(float(item.get("reward", 0.0))))
+            style = f"background:{color};border-bottom:2px solid #374151;"
+            label = "实际 token 打分"
+        is_extreme = bool(item.get("is_extreme_token"))
+        if is_extreme and highlight_extreme_adv:
+            extreme_side = str(item.get("extreme_adv_side") or "high")
+            outline = "#dc2626" if extreme_side == "low" else "#f59e0b"
+            style += f"outline:2px solid {outline};box-shadow:0 0 0 2px {outline}55;font-weight:700;"
+            label += f" | 极端 adv: {extreme_side}"
+        elif dim_non_extreme:
+            style += "opacity:0.35;"
+        adv_source = str(item.get("adv_source", "") or "")
+        prefix = f"{side} ↔ GT#{gt_id} | {label}" if gt_id >= 0 and not is_fallback else f"{side} | {label}"
+        info = (
+            f"{prefix}\n"
+            f"reward: {float(item.get('reward', 0.0)):.4f}\n"
+            f"adv: {float(item.get('adv', 0.0)):+.4f}\n"
+            f"adv_source: {adv_source}\n"
+            f"chunk_type: {item.get('chunk_type', '')}\n"
+            f"reward_source: {item.get('reward_source', '')}"
+        )
+        seg = html.escape(source[start:end])
+        pieces.append(
+            f"<span class='formula-token-seg' data-formula-info='{html.escape(info, quote=True)}' "
+            f"style='{style}cursor:help;padding:0 1px;border-radius:3px;'>{seg}</span>"
+        )
+        cursor = end
+    if cursor < len(source):
+        pieces.append(html.escape(source[cursor:]))
+    return "".join(pieces)
+
+
+def formula_chunk_detail_rows(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for chunk in sorted(
+        chunks,
+        key=lambda item: (int(item.get("start_char", item.get("pred_char_start", 0))), int(item.get("chunk_id", 0))),
+    ):
+        matched_gt = chunk.get("matched_gt_chunk_id", chunk.get("gt_chunk_id"))
+        matched_gt_text = "-" if matched_gt is None or int(matched_gt) < 0 else str(int(matched_gt))
+        text = str(chunk.get("pred_chunk_text", chunk.get("token_text", "")) or "")
+        rows.append(
+            {
+                "chunk_id": int(chunk.get("chunk_id", 0)),
+                "type": str(chunk.get("chunk_type", "") or ""),
+                "scored": "否" if bool(chunk.get("is_fallback", False)) else "是",
+                "fallback": bool(chunk.get("is_fallback", False)),
+                "matched_gt": matched_gt_text,
+                "reward": round(float(chunk.get("reward_raw", chunk.get("reward", 0.0)) or 0.0), 6),
+                "adv": round(float(chunk.get("adv", chunk.get("token_adv", 0.0)) or 0.0), 6),
+                "extreme": "⚠" if bool(chunk.get("is_extreme_token")) else "",
+                "extreme_side": chunk.get("extreme_adv_side"),
+                "adv_source": str(chunk.get("adv_source", "") or ""),
+                "reward_source": str(chunk.get("reward_source", "") or ""),
+                "pred_chunk": text if len(text) <= 96 else text[:96] + "...",
+            }
+        )
+    return rows
+
+
+def render_formula_token_interactive_pair(
+    *,
+    gt_text: str,
+    pred_text: str,
+    chunks: list[dict[str, Any]],
+    case_mean: float,
+    case_std: float,
+    chunk_seq_adv: float,
+    response_index: int,
+    highlight_extreme_adv: bool = False,
+    dim_non_extreme: bool = False,
+    focus_extreme_only: bool = False,
+) -> None:
+    show_extreme = highlight_extreme_adv or focus_extreme_only
+    dim_others = dim_non_extreme or focus_extreme_only
+    element_chunks = [
+        c
+        for c in chunks
+        if str(c.get("chunk_type", "")) == "formula_visual_token" and not bool(c.get("is_fallback", False))
+    ]
+    color_by_gt = _formula_gt_color_map(element_chunks)
+    gt_spans = _locate_gt_spans_for_formula(gt_text, element_chunks)
+    pred_spans = _build_formula_pred_spans(chunks)
+
+    gt_html = _highlight_formula_token_source(
+        gt_text,
+        gt_spans,
+        color_by_gt=color_by_gt,
+        side="GT",
+        highlight_extreme_adv=show_extreme,
+        dim_non_extreme=dim_others,
+    )
+    pred_html = _highlight_formula_token_source(
+        pred_text,
+        pred_spans,
+        color_by_gt=color_by_gt,
+        side="Pred",
+        highlight_extreme_adv=show_extreme,
+        dim_non_extreme=dim_others,
+    )
+    default_info = "悬停高亮片段：实线=实际 token 打分；虚线灰底=chunk-sequence fallback。"
+    component_id = stable_id(f"formula-token-{gt_text[:500]}-{pred_text[:500]}-{response_index}")
+
+    components.html(
+        f"""
+<style>
+#{component_id} {{
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #111827;
+}}
+#{component_id} .formula-grid {{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+}}
+#{component_id} .panel-title {{ font-weight: 700; margin-bottom: 6px; font-size: 13px; }}
+#{component_id} .source-wrap {{
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  padding: 12px;
+  background: #ffffff;
+  box-sizing: border-box;
+  width: 100%;
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-x: auto;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}}
+#{component_id} .formula-token-seg.active {{
+  box-shadow: inset 0 0 0 2px rgba(37, 99, 235, 0.85);
+}}
+#{component_id} .legend {{
+  margin-top: 8px;
+  font-size: 12px;
+  color: #4b5563;
+}}
+#{component_id} .info-card {{
+  margin-top: 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 12px 14px;
+}}
+#{component_id} .info-body {{ white-space: pre-wrap; font-size: 13px; min-height: 72px; }}
+</style>
+<div id="{component_id}">
+  <div class="formula-grid">
+    <div>
+      <div class="panel-title">Ground Truth</div>
+      <div class="source-wrap">{gt_html}</div>
+    </div>
+    <div>
+      <div class="panel-title">Prediction (r{response_index:02d})</div>
+      <div class="source-wrap">{pred_html}</div>
+    </div>
+  </div>
+  <div class="legend">
+    <span style="border-bottom:2px solid #374151;background:#dcfce7;padding:0 4px;">实际打分 token</span>
+    &nbsp;&nbsp;
+    <span style="border-bottom:2px dashed #9ca3af;background:#f3f4f6;padding:0 4px;">fallback（chunk_seq_adv）</span>
+  </div>
+  <div class="info-card">
+    <div class="panel-title">Token/Chunk Detail</div>
+    <div class="info-body" id="{component_id}-info">{html.escape(default_info)}</div>
+    <div class="legend">case_mean={case_mean:.4f} | case_std={case_std:.4f} | chunk_seq_adv={chunk_seq_adv:+.4f}</div>
+  </div>
+</div>
+<script>
+(function() {{
+  const root = document.getElementById("{component_id}");
+  if (!root) return;
+  const infoBox = document.getElementById("{component_id}-info");
+  const defaultInfo = {json.dumps(default_info)};
+  function clearActive() {{
+    root.querySelectorAll(".formula-token-seg.active").forEach((el) => el.classList.remove("active"));
+  }}
+  root.querySelectorAll(".formula-token-seg").forEach((el) => {{
+    el.addEventListener("mouseenter", () => {{
+      clearActive();
+      el.classList.add("active");
+      if (infoBox) infoBox.textContent = el.getAttribute("data-formula-info") || defaultInfo;
+    }});
+    el.addEventListener("mouseleave", () => {{
+      clearActive();
+      if (infoBox) infoBox.textContent = defaultInfo;
+    }});
+  }});
+}})();
+</script>
+""",
+        height=780,
+        scrolling=True,
+    )

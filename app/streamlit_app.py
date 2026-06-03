@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import streamlit as st
 
+from ocr_viz.adv_stats import (
+    copy_pairs_and_enrich,
+    format_threshold_summary,
+    sample_has_extreme_response,
+)
 from ocr_viz.io_utils import (
     append_jsonl,
     chunk_key,
@@ -20,8 +30,10 @@ from ocr_viz.ui_renderers import (
     advantage_color,
     colorized_adv_html,
     format_table_source_with_tr_newlines,
+    formula_chunk_detail_rows,
     render_code_block,
     render_formula_preview,
+    render_formula_token_interactive_pair,
     render_interactive_table_pair_html,
     render_table_html,
     render_text_block,
@@ -30,7 +42,9 @@ from ocr_viz.ui_renderers import (
 )
 
 
-DEFAULT_RUN_ROOT = Path("/user/wangzhilue/algorithm/visualization-v1/runs")
+RUNS_ROOT = Path("/user/chenyunyi/projects/verl_mm/tmp_scripts/visualization-v1/runs")
+DEFAULT_RUN_ROOT = RUNS_ROOT / "rmodel"
+FORMULA_TOKEN_RUN_ROOT = RUNS_ROOT / "formula_token_passk"
 CASE_LABELS = ["unmarked", "incorrect", "correct", "minor_error"]
 CASE_LABEL_DISPLAY = {
     "unmarked": "未标注",
@@ -169,6 +183,16 @@ def load_run_data(run_dir_str: str) -> dict[str, Any]:
     return {"metadata": metadata, "pairs": pair_views}
 
 
+@st.cache_data(show_spinner=False)
+def load_pairs_with_adv_stats(run_dir_str: str, abs_adv_threshold: float) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    data = load_run_data(run_dir_str)
+    return copy_pairs_and_enrich(data["pairs"], abs_threshold=abs_adv_threshold)
+
+
+def rebuild_sample_views(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return build_sample_views(pairs)
+
+
 def build_sample_views(pairs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for pair_item in pairs:
@@ -228,6 +252,49 @@ def save_case_annotation(run_dir: Path, sample_id: str, label: str, note: str) -
     )
 
 
+def annotation_pair_key(sample_id: str, pair_item: dict[str, Any], response_index: int | None = None) -> str:
+    existing = str(pair_item.get("pair_key", "") or "")
+    if existing:
+        return existing
+    if response_index is None:
+        response_index = int(pair_item.get("response_index", 0) or 0)
+    strategy = str(pair_item.get("strategy", "") or pair_item.get("chunk_strategy", "") or "default")
+    return pair_key(str(sample_id), int(response_index), strategy)
+
+
+def save_pair_annotation(
+    run_dir: Path,
+    *,
+    sample_id: str,
+    pair_id: str,
+    response_index: int,
+    label: str,
+    note: str,
+) -> None:
+    annotations = load_annotations(run_dir)
+    now = datetime.now().isoformat(timespec="seconds")
+    annotations["pair_annotations"][pair_id] = {
+        "sample_id": str(sample_id),
+        "response_index": int(response_index),
+        "label": label,
+        "note": note.strip(),
+        "updated_at": now,
+    }
+    save_json(run_dir / "annotations_current.json", annotations)
+    append_jsonl(
+        run_dir / "annotation_events.jsonl",
+        {
+            "kind": "pair_annotation",
+            "sample_id": str(sample_id),
+            "pair_key": str(pair_id),
+            "response_index": int(response_index),
+            "label": label,
+            "note": note.strip(),
+            "updated_at": now,
+        },
+    )
+
+
 def save_chunk_annotations(run_dir: Path, updates: list[dict[str, Any]]) -> None:
     annotations = load_annotations(run_dir)
     now = datetime.now().isoformat(timespec="seconds")
@@ -259,6 +326,20 @@ def get_case_label(annotations: dict[str, Any], sample_id: str) -> str:
     return label if label in CASE_LABELS else "unmarked"
 
 
+def get_pair_annotation(annotations: dict[str, Any], sample_id: str, pair_id: str) -> dict[str, Any]:
+    pair_value = annotations.get("pair_annotations", {}).get(pair_id)
+    if isinstance(pair_value, dict):
+        return pair_value
+    legacy_case = annotations.get("case_annotations", {}).get(sample_id, {})
+    return legacy_case if isinstance(legacy_case, dict) else {}
+
+
+def get_pair_label(annotations: dict[str, Any], sample_id: str, pair_id: str) -> str:
+    value = get_pair_annotation(annotations, sample_id, pair_id)
+    label = str(value.get("label", "unmarked"))
+    return label if label in CASE_LABELS else "unmarked"
+
+
 def get_chunk_label(annotations: dict[str, Any], chunk_id: str) -> str:
     value = annotations.get("chunk_annotations", {}).get(chunk_id, {})
     label = str(value.get("label", "unmarked"))
@@ -276,6 +357,30 @@ def summarize_case_labels(samples: list[dict[str, Any]], annotations: dict[str, 
         label = get_case_label(annotations, str(item.get("sample_id", "")))
         counts[label] += 1
     return {"total": len(samples), **counts}
+
+
+def sample_has_pair_label(sample_view: dict[str, Any], annotations: dict[str, Any], label: str) -> bool:
+    sample_id = str(sample_view.get("sample_id", ""))
+    for pair_item in sample_view.get("pairs", []) or []:
+        response_index = int(pair_item.get("response_index", 0) or 0)
+        pair_id = annotation_pair_key(sample_id, pair_item, response_index)
+        if get_pair_label(annotations, sample_id, pair_id) == label:
+            return True
+    return False
+
+
+def summarize_pair_labels(samples: list[dict[str, Any]], annotations: dict[str, Any]) -> dict[str, int]:
+    counts = {label: 0 for label in CASE_LABELS}
+    total = 0
+    for sample_view in samples:
+        sample_id = str(sample_view.get("sample_id", ""))
+        for pair_item in sample_view.get("pairs", []) or []:
+            response_index = int(pair_item.get("response_index", 0) or 0)
+            pair_id = annotation_pair_key(sample_id, pair_item, response_index)
+            label = get_pair_label(annotations, sample_id, pair_id)
+            counts[label] += 1
+            total += 1
+    return {"total": total, **counts}
 
 
 def format_ratio(numerator: int, denominator: int) -> str:
@@ -412,10 +517,13 @@ def chunk_label_from_checkboxes(correct_key: str, incorrect_key: str) -> str:
 def table_chunk_info_text(chunk: dict[str, Any], *, seq_adv: float) -> str:
     chunk_adv = safe_float_or_none(chunk.get("chunk_normed_adv"))
     chunk_adv_text = "N/A" if chunk_adv is None else f"{chunk_adv:+.4f}"
+    extreme_line = ""
+    if bool(chunk.get("is_extreme_token")):
+        extreme_line = f"\n⚠ extreme_adv: {chunk.get('extreme_adv_side', 'extreme')} tail"
     return (
         f"Chunk #{int(chunk.get('chunk_id', 0) or 0)}\n"
         f"reward: {reward_hover_text(chunk)}\n"
-        f"chunk_adv: {chunk_adv_text}\n"
+        f"chunk_adv: {chunk_adv_text}{extreme_line}\n"
         f"seq_adv: {seq_adv:+.4f}\n"
         f"matching_reward: {chunk.get('matching_reward')}\n"
         f"reward_source: {chunk.get('reward_source')}\n"
@@ -443,7 +551,12 @@ def table_chunk_adv_color(*, reward: float, chunk_adv: float | None) -> str:
     return interpolate_rgb((220, 252, 231), (74, 222, 128), ratio)
 
 
-def build_table_hover_maps(chunks: list[dict[str, Any]], *, seq_adv: float) -> dict[str, dict[int, Any]]:
+def build_table_hover_maps(
+    chunks: list[dict[str, Any]],
+    *,
+    seq_adv: float,
+    highlight_extreme_adv: bool = False,
+) -> dict[str, dict[int, Any]]:
     pred_info: dict[int, str] = {}
     gt_info: dict[int, str] = {}
     pred_bad: dict[int, bool] = {}
@@ -457,7 +570,11 @@ def build_table_hover_maps(chunks: list[dict[str, Any]], *, seq_adv: float) -> d
         reward = safe_float(chunk.get("reward_raw", chunk.get("reward")), 0.0)
         chunk_adv = safe_float_or_none(chunk.get("chunk_normed_adv"))
         is_bad = reward < 0.999999
+        is_extreme = bool(chunk.get("is_extreme_token"))
         color = table_chunk_adv_color(reward=reward, chunk_adv=chunk_adv)
+        if highlight_extreme_adv and is_extreme:
+            side = str(chunk.get("extreme_adv_side") or "high")
+            color = "#fecaca" if side == "low" else "#fde68a"
         info_text = table_chunk_info_text(chunk, seq_adv=seq_adv)
         pred_idx_raw = chunk.get("pred_tr_index")
         gt_idx_raw = chunk.get("gt_chunk_id", chunk.get("chunk_id"))
@@ -523,6 +640,94 @@ def render_case_annotation_form(run_dir: Path, annotations: dict[str, Any], samp
         st.rerun()
 
 
+def render_pair_annotation_form(
+    run_dir: Path,
+    annotations: dict[str, Any],
+    *,
+    sample_id: str,
+    pair_item: dict[str, Any],
+    response_index: int,
+) -> None:
+    pair_id = annotation_pair_key(sample_id, pair_item, response_index)
+    current_annotation = get_pair_annotation(annotations, sample_id, pair_id)
+    current_label = str(current_annotation.get("label", "unmarked"))
+    if current_label not in CASE_LABELS:
+        current_label = "unmarked"
+    current_note = str(current_annotation.get("note", ""))
+    form_key = f"pair-form-{stable_id(pair_id)}"
+    with st.form(form_key):
+        st.markdown(f"#### GT-response 标注 r{response_index:02d}")
+        new_label = st.selectbox(
+            "当前 GT-response 奖励是否正确",
+            options=CASE_LABELS,
+            index=CASE_LABELS.index(current_label),
+            format_func=case_label_text,
+            key=f"pair-label-{stable_id(pair_id)}",
+        )
+        new_note = st.text_input(
+            "备注（可选）",
+            value=current_note,
+            key=f"pair-note-{stable_id(pair_id)}",
+        )
+        submitted = st.form_submit_button("保存当前 GT-response 标注")
+    if submitted:
+        save_pair_annotation(
+            run_dir,
+            sample_id=sample_id,
+            pair_id=pair_id,
+            response_index=response_index,
+            label=new_label,
+            note=new_note,
+        )
+        st.success(f"GT-response r{response_index:02d} annotation saved.")
+        st.rerun()
+
+
+def render_extreme_adv_panel(
+    pair_item: dict[str, Any],
+    *,
+    response_index: int,
+    scope_key: str,
+    task_type: str,
+) -> bool:
+    """Render control + table for extreme adv tokens. Returns whether focus mode is active."""
+    pair_key_str = str(pair_item.get("pair_key", "")) or f"r{response_index:02d}"
+    widget_key = f"focus-extreme-{scope_key}-{stable_id(pair_key_str)}"
+    list_key = f"show-extreme-list-{widget_key}"
+    extreme_tokens = list(pair_item.get("extreme_tokens", []) or [])
+    is_extreme_response = bool(pair_item.get("is_extreme_response"))
+    count = int(pair_item.get("extreme_token_count", len(extreme_tokens)) or 0)
+
+    focus_extreme = bool(st.session_state.get(widget_key, False))
+    btn_col, toggle_col = st.columns([1, 2])
+    with btn_col:
+        if is_extreme_response and st.button(
+            f"显示极端 adv token ({count})",
+            key=f"btn-{widget_key}",
+            help="展开 token 列表并聚焦高亮极端 token",
+        ):
+            st.session_state[list_key] = True
+            st.session_state[widget_key] = True
+            focus_extreme = True
+    with toggle_col:
+        if is_extreme_response:
+            focus_extreme = st.checkbox(
+                f"聚焦高亮 r{response_index:02d} 的 {count} 个极端 token",
+                key=widget_key,
+                value=focus_extreme,
+            )
+        elif task_type:
+            st.caption("该 rollout 无极端 adv token")
+
+    if is_extreme_response and extreme_tokens:
+        with st.expander(
+            f"极端 adv token 列表 r{response_index:02d}",
+            expanded=bool(st.session_state.get(list_key, False)) or focus_extreme,
+        ):
+            st.dataframe(extreme_tokens, use_container_width=True, hide_index=True)
+    return focus_extreme
+
+
 def render_text_sample(
     *,
     run_dir: Path,
@@ -530,8 +735,11 @@ def render_text_sample(
     sample_view: dict[str, Any],
     annotations: dict[str, Any],
     max_tokens: int,
+    scope_key: str,
+    highlight_extreme_adv: bool,
 ) -> None:
     sample = sample_view.get("sample", {})
+    sample_id = str(sample_view.get("sample_id", ""))
     gt_text = str(sample.get("ground_truth", ""))
     seq_by_resp = sequence_row_by_response(sample_view)
     success_threshold = safe_float(metadata.get("success_threshold"), 1.0)
@@ -550,10 +758,11 @@ def render_text_sample(
         seq_row = seq_by_resp.get(response_index, {})
         seq_reward = safe_float(seq_row.get("final_reward", pair_item.get("seq_final_reward")), 0.0)
         seq_adv = safe_float(seq_row.get("adv", pair_item.get("seq_adv")), 0.0)
+        extreme_tag = " | ⚠ extreme response" if bool(pair_item.get("is_extreme_response")) else ""
 
         st.markdown("---")
         st.markdown(
-            f"### Rollout r{response_index:02d} | seq_reward={seq_reward:.4f} | seq_adv={colorized_adv_html(seq_adv)}",
+            f"### Rollout r{response_index:02d} | seq_reward={seq_reward:.4f} | seq_adv={colorized_adv_html(seq_adv)}{extreme_tag}",
             unsafe_allow_html=True,
         )
         m1, m2, m3, m4, m5 = st.columns(5)
@@ -563,7 +772,20 @@ def render_text_sample(
         m4.metric("Token Count", f"{int(pair_item.get('token_count', pair_item.get('chunk_count', len(pair_item.get('chunks', [])))) or 0)}")
         m5.metric("Token Std", f"{safe_float(pair_item.get('sample_token_reward_std', pair_item.get('reward_std')), 0.0):.4f}")
 
+        render_pair_annotation_form(
+            run_dir,
+            annotations,
+            sample_id=sample_id,
+            pair_item=pair_item,
+            response_index=response_index,
+        )
         render_text_block("Prediction", prediction_text, height_px=150)
+        focus_extreme = render_extreme_adv_panel(
+            pair_item,
+            response_index=response_index,
+            scope_key=scope_key,
+            task_type="text",
+        )
         st.markdown("#### Token 级映射（hover 查看奖励信息）")
         render_token_alignment_component(
             prediction_text,
@@ -571,6 +793,8 @@ def render_text_sample(
             list(pair_item.get("chunks", [])),
             max_tokens=max_tokens,
             sample_gt_first_hit_rollout=sample_gt_first_hit_rollout,
+            highlight_extreme_adv=highlight_extreme_adv,
+            focus_extreme_only=focus_extreme,
         )
         with st.expander(f"Token rows r{response_index:02d}", expanded=False):
             st.dataframe(list(pair_item.get("chunks", [])), use_container_width=True)
@@ -676,8 +900,11 @@ def render_table_sample(
     run_dir: Path,
     sample_view: dict[str, Any],
     annotations: dict[str, Any],
+    scope_key: str,
+    highlight_extreme_adv: bool,
 ) -> None:
     sample = sample_view.get("sample", {})
+    sample_id = str(sample_view.get("sample_id", ""))
     gt_table = str(sample.get("ground_truth", ""))
     seq_by_resp = sequence_row_by_response(sample_view)
 
@@ -688,11 +915,22 @@ def render_table_sample(
         seq_reward = safe_float(seq_row.get("final_reward", pair_item.get("seq_final_reward")), 0.0)
         seq_adv = safe_float(seq_row.get("adv", pair_item.get("seq_adv")), 0.0)
         chunks = list(pair_item.get("chunks", []))
-        hover_maps = build_table_hover_maps(chunks, seq_adv=seq_adv)
+        extreme_tag = " | ⚠ extreme response" if bool(pair_item.get("is_extreme_response")) else ""
+        focus_extreme = render_extreme_adv_panel(
+            pair_item,
+            response_index=response_index,
+            scope_key=scope_key,
+            task_type="table",
+        )
+        hover_maps = build_table_hover_maps(
+            chunks,
+            seq_adv=seq_adv,
+            highlight_extreme_adv=highlight_extreme_adv or focus_extreme,
+        )
 
         st.markdown("---")
         st.markdown(
-            f"### Rollout r{response_index:02d} | seq_reward={seq_reward:.4f} | seq_adv={colorized_adv_html(seq_adv)}",
+            f"### Rollout r{response_index:02d} | seq_reward={seq_reward:.4f} | seq_adv={colorized_adv_html(seq_adv)}{extreme_tag}",
             unsafe_allow_html=True,
         )
         m1, m2, m3, m4 = st.columns(4)
@@ -701,6 +939,13 @@ def render_table_sample(
         m3.metric("Mean Chunk Reward", f"{safe_float(pair_item.get('mean_chunk_reward'), 0.0):.4f}")
         m4.metric("Reward Std", f"{safe_float(pair_item.get('reward_std'), 0.0):.4f}")
 
+        render_pair_annotation_form(
+            run_dir,
+            annotations,
+            sample_id=sample_id,
+            pair_item=pair_item,
+            response_index=response_index,
+        )
         render_interactive_table_pair_html(
             left_title="Ground Truth Table",
             left_table_html=gt_table,
@@ -725,13 +970,26 @@ def render_table_sample(
             st.dataframe(chunks, use_container_width=True)
 
 
+def _is_formula_token_run(sample_view: dict[str, Any], metadata: dict[str, Any]) -> bool:
+    if str(metadata.get("strategy", "")) == "formula_token":
+        return True
+    pairs = sample_view.get("pairs", [])
+    if pairs and str(pairs[0].get("strategy", "")) == "formula_token":
+        return True
+    return any(bool(pair_item.get("chunks")) and "is_fallback" in (pair_item.get("chunks") or [{}])[0] for pair_item in pairs)
+
+
 def render_formula_sample(
     *,
     run_dir: Path,
     sample_view: dict[str, Any],
     annotations: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+    scope_key: str = "",
+    highlight_extreme_adv: bool = False,
 ) -> None:
     sample = sample_view.get("sample", {})
+    sample_id = str(sample_view.get("sample_id", ""))
     gt_formula = str(sample.get("ground_truth", ""))
     seq_by_resp = sequence_row_by_response(sample_view)
     rollout_predictions = [
@@ -739,23 +997,96 @@ def render_formula_sample(
         for pair_item in sample_view.get("pairs", [])
     ]
     common_mask = build_formula_common_mask(gt_formula, rollout_predictions)
+    token_run = _is_formula_token_run(sample_view, metadata or {})
+
+    if token_run:
+        first_pair = sample_view.get("pairs", [{}])[0]
+        st.caption(
+            "Formula token-level 可视化：实线高亮=实际 visual token 打分；虚线灰底=未覆盖片段，adv 使用 chunk_seq_adv fallback。"
+        )
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Case element mean", f"{safe_float(first_pair.get('case_element_mean'), 0.0):.4f}")
+        c2.metric("Case element std", f"{safe_float(first_pair.get('case_element_std'), 0.0):.4f}")
+        c3.metric("Case element count", f"{int(first_pair.get('case_element_count', 0) or 0)}")
+        c4.metric("Reward mode", str(metadata.get("reward_mode", "formula_token") if metadata else "formula_token"))
 
     for pair_item in sample_view.get("pairs", []):
         response_index = int(pair_item.get("response_index", 0))
         prediction_text = str(pair_item.get("prediction", {}).get("response_text", pair_item.get("response_text", "")))
         seq_row = seq_by_resp.get(response_index, {})
-        seq_reward = safe_float(seq_row.get("final_reward", pair_item.get("seq_final_reward")), 0.0)
-        seq_adv = safe_float(seq_row.get("adv", pair_item.get("seq_adv")), 0.0)
+        seq_reward = safe_float(
+            seq_row.get("final_reward", pair_item.get("seq_final_reward", pair_item.get("chunk_sequence_reward"))),
+            0.0,
+        )
+        seq_adv = safe_float(seq_row.get("adv", pair_item.get("seq_adv", pair_item.get("chunk_seq_adv"))), 0.0)
+        chunks = list(pair_item.get("chunks", []))
+        extreme_tag = " | ⚠ extreme response" if bool(pair_item.get("is_extreme_response")) else ""
+        focus_extreme = render_extreme_adv_panel(
+            pair_item,
+            response_index=response_index,
+            scope_key=scope_key,
+            task_type="formula",
+        )
 
         st.markdown("---")
         st.markdown(
-            f"### Rollout r{response_index:02d} | seq_reward={seq_reward:.4f} | seq_adv={colorized_adv_html(seq_adv)}",
+            f"### Rollout r{response_index:02d} | chunk_seq_reward={seq_reward:.4f} | chunk_seq_adv={colorized_adv_html(seq_adv)}{extreme_tag}",
             unsafe_allow_html=True,
         )
+        if token_run:
+            element_count = int(pair_item.get("element_count", pair_item.get("token_count", 0)) or 0)
+            fallback_count = int(pair_item.get("fallback_chunk_count", 0) or 0)
+            if not fallback_count:
+                fallback_count = sum(1 for c in chunks if bool(c.get("is_fallback")))
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Element tokens", element_count)
+            m2.metric("Fallback chunks", fallback_count)
+            m3.metric("Mean chunk reward", f"{safe_float(pair_item.get('mean_token_reward', pair_item.get('mean_chunk_reward')), 0.0):.4f}")
+            m4.metric("Pair reward (F1)", f"{safe_float(pair_item.get('pair_reward'), 0.0):.4f}")
+
+            render_pair_annotation_form(
+                run_dir,
+                annotations,
+                sample_id=sample_id,
+                pair_item=pair_item,
+                response_index=response_index,
+            )
+            render_formula_token_interactive_pair(
+                gt_text=gt_formula,
+                pred_text=prediction_text,
+                chunks=chunks,
+                case_mean=safe_float(pair_item.get("case_element_mean"), 0.0),
+                case_std=safe_float(pair_item.get("case_element_std"), 0.0),
+                chunk_seq_adv=seq_adv,
+                response_index=response_index,
+                highlight_extreme_adv=highlight_extreme_adv,
+                focus_extreme_only=focus_extreme,
+            )
+            with st.expander(f"Token/chunk rows r{response_index:02d}", expanded=False):
+                detail_rows = formula_chunk_detail_rows(chunks)
+                if detail_rows:
+                    st.dataframe(detail_rows, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No chunk rows.")
+            st.markdown("**LaTeX 渲染预览**")
+            c1, c2 = st.columns(2)
+            with c1:
+                render_formula_preview("Ground Truth", gt_formula, common_mask=common_mask)
+            with c2:
+                render_formula_preview("Prediction", prediction_text, common_mask=common_mask)
+            continue
+
         m1, m2, m3 = st.columns(3)
         m1.metric("Pair Reward", f"{safe_float(pair_item.get('pair_reward'), 0.0):.4f}")
         m2.metric("Sequence Reward", f"{seq_reward:.4f}")
         m3.metric("Sequence Adv", f"{seq_adv:+.4f}")
+        render_pair_annotation_form(
+            run_dir,
+            annotations,
+            sample_id=sample_id,
+            pair_item=pair_item,
+            response_index=response_index,
+        )
         st.caption(
             f"formula_server_url={pair_item.get('formula_server_url') or seq_row.get('formula_server_url') or 'N/A'} | "
             f"formula_server_failed={pair_item.get('formula_server_failed')}"
@@ -791,27 +1122,48 @@ def render_sample_header(sample_view: dict[str, Any], run_dir: Path) -> None:
             render_text_block("Prompt", prompt_text, height_px=180)
 
 
-def render_sequence_overview(sample_view: dict[str, Any]) -> None:
+def render_sequence_overview(sample_view: dict[str, Any], adv_stats: dict[str, Any] | None = None) -> None:
     rows = sequence_rows_for_sample(sample_view)
     if not rows:
         st.info("No sequence-level responses found.")
         return
 
+    response_flags = (adv_stats or {}).get("response_flags", {})
     st.markdown("### Sequence-level 对比（当前 sample 全部 rollouts）")
-    st.dataframe(
-        [
+    overview_rows = []
+    for row in rows:
+        response_index = int(row.get("response_index", 0))
+        flag = response_flags.get(response_index, {})
+        pair_extreme = any(
+            int(item.get("response_index", -1)) == response_index and bool(item.get("is_extreme_response"))
+            for item in sample_view.get("pairs", [])
+        )
+        overview_rows.append(
             {
-                "response_index": int(row.get("response_index", 0)),
+                "response_index": response_index,
                 "final_reward": round(safe_float(row.get("final_reward"), 0.0), 6),
                 "adv": round(safe_float(row.get("adv"), 0.0), 6),
+                "extreme_response": "⚠ yes" if pair_extreme else "no",
+                "extreme_token_count": int(
+                    next(
+                        (
+                            int(item.get("extreme_token_count", 0) or 0)
+                            for item in sample_view.get("pairs", [])
+                            if int(item.get("response_index", -1)) == response_index
+                        ),
+                        flag.get("extreme_token_count", 0),
+                    )
+                ),
+                "chunk_seq_reward": round(safe_float(row.get("chunk_seq_reward", row.get("final_reward")), 0.0), 6),
+                "chunk_seq_adv": round(safe_float(row.get("chunk_seq_adv", row.get("adv")), 0.0), 6),
+                "element_count": int(row.get("element_count", 0) or 0),
+                "fallback_chunk_count": int(row.get("fallback_chunk_count", 0) or 0),
                 "base_reward": round(safe_float(row.get("base_reward"), 0.0), 6),
                 "aux_deducted_penalty": round(safe_float(row.get("aux_deducted_penalty"), 0.0), 6),
                 "response_preview": str(row.get("response_text", ""))[:120],
             }
-            for row in rows
-        ],
-        use_container_width=True,
-    )
+        )
+    st.dataframe(overview_rows, use_container_width=True)
 
 
 def main() -> None:
@@ -820,10 +1172,17 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Run Selection")
-        run_root_str = st.text_input("Run root", value=str(DEFAULT_RUN_ROOT))
+        run_root_str = st.text_input(
+            "Run root",
+            value=str(DEFAULT_RUN_ROOT),
+            help="可填 runs/ 或 runs/formula_token_passk/；会递归查找含 metadata.json 的 run 目录",
+        )
         runs = discover_runs_cached(run_root_str)
         if not runs:
-            st.warning("No runs found under the selected root.")
+            st.warning(
+                "No runs found under the selected root. "
+                f"Formula pass@k 示例: {FORMULA_TOKEN_RUN_ROOT}"
+            )
             return
         selected_run = st.selectbox("Choose run", options=runs, index=0, format_func=lambda path: Path(path).name)
         if st.button("Refresh run data"):
@@ -831,23 +1190,41 @@ def main() -> None:
             st.rerun()
 
     run_dir = Path(selected_run)
-    data = load_run_data(selected_run)
-    pairs = data["pairs"]
-    metadata = data["metadata"]
+    with st.sidebar:
+        st.header("Adv Extremeness")
+        abs_adv_threshold = st.number_input(
+            "|adv| threshold",
+            min_value=0.0,
+            value=2.0,
+            step=0.1,
+            help="标记 abs(token_adv) 大于等于该值的 token 为极端 token",
+        )
+        highlight_extreme_adv = st.checkbox("全局高亮极端 adv token", value=False)
+        only_extreme_samples = st.checkbox("仅显示含极端 response 的 sample", value=False)
+
+    pairs, adv_stats = load_pairs_with_adv_stats(selected_run, float(abs_adv_threshold))
+    metadata = load_run_data(selected_run)["metadata"]
     annotations = load_annotations(run_dir)
 
     if not pairs:
         st.error("No pair rows found in this run.")
         return
 
-    sample_views = build_sample_views(pairs)
+    sample_views = rebuild_sample_views(pairs)
+
+    with st.sidebar:
+        st.caption(format_threshold_summary(adv_stats))
+        st.caption(
+            f"极端 response: {adv_stats.get('extreme_response_count', 0)} / {len(pairs)} | "
+            f"极端 token: {adv_stats.get('extreme_token_count', 0)}"
+        )
 
     with st.sidebar:
         st.header("Filters")
         task_type_filter = st.selectbox("Task type", options=["all", "text", "table", "formula"], index=0)
         sample_filter = st.text_input("Sample ID contains", value="")
-        case_status_filter = st.selectbox(
-            "Case annotation status",
+        pair_status_filter = st.selectbox(
+            "GT-response annotation status",
             options=["all", *CASE_LABELS],
             index=0,
             format_func=lambda value: "全部" if value == "all" else case_label_text(value),
@@ -860,20 +1237,22 @@ def main() -> None:
     if sample_filter.strip():
         needle = sample_filter.strip()
         visible_samples = [item for item in visible_samples if needle in str(item.get("sample_id", ""))]
-    if case_status_filter != "all":
+    if pair_status_filter != "all":
         visible_samples = [
             item
             for item in visible_samples
-            if get_case_label(annotations, str(item.get("sample_id", ""))) == case_status_filter
+            if sample_has_pair_label(item, annotations, pair_status_filter)
         ]
+    if only_extreme_samples:
+        visible_samples = [item for item in visible_samples if sample_has_extreme_response(item)]
 
-    case_stats = summarize_case_labels(visible_samples, annotations)
+    pair_stats = summarize_pair_labels(visible_samples, annotations)
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Case 总数", f"{case_stats['total']}")
-    m2.metric("未标注", f"{case_stats['unmarked']}", format_ratio(case_stats["unmarked"], case_stats["total"]))
-    m3.metric("错误", f"{case_stats['incorrect']}", format_ratio(case_stats["incorrect"], case_stats["total"]))
-    m4.metric("正确", f"{case_stats['correct']}", format_ratio(case_stats["correct"], case_stats["total"]))
-    m5.metric("轻微错误", f"{case_stats['minor_error']}", format_ratio(case_stats["minor_error"], case_stats["total"]))
+    m1.metric("GT-response 总数", f"{pair_stats['total']}")
+    m2.metric("未标注", f"{pair_stats['unmarked']}", format_ratio(pair_stats["unmarked"], pair_stats["total"]))
+    m3.metric("错误", f"{pair_stats['incorrect']}", format_ratio(pair_stats["incorrect"], pair_stats["total"]))
+    m4.metric("正确", f"{pair_stats['correct']}", format_ratio(pair_stats["correct"], pair_stats["total"]))
+    m5.metric("轻微错误", f"{pair_stats['minor_error']}", format_ratio(pair_stats["minor_error"], pair_stats["total"]))
 
     if not visible_samples:
         st.warning("No samples match current filters.")
@@ -881,7 +1260,7 @@ def main() -> None:
             st.json(metadata)
         return
 
-    scope_key = stable_id(f"{selected_run}|{task_type_filter}|{sample_filter.strip()}|{case_status_filter}")
+    scope_key = stable_id(f"{selected_run}|{task_type_filter}|{sample_filter.strip()}|{pair_status_filter}")
     sample_select_key = f"sample-select-{scope_key}"
     st.session_state.setdefault(sample_select_key, 0)
     st.session_state[sample_select_key] = max(
@@ -909,6 +1288,7 @@ def main() -> None:
             options=list(range(len(visible_samples))),
             key=sample_select_key,
             format_func=lambda idx: (
+                f"{'⚠ ' if sample_has_extreme_response(visible_samples[idx]) else ''}"
                 f"{visible_samples[idx].get('sample_id', '')} | "
                 f"{visible_samples[idx].get('task_type', '')} | "
                 f"rollouts={len(visible_samples[idx].get('pairs', []))}"
@@ -916,8 +1296,11 @@ def main() -> None:
         )
 
     current_sample = visible_samples[int(selected_sample_index)]
-    st.subheader(f"task_type: {current_sample.get('task_type', '')}")
-    render_sequence_overview(current_sample)
+    st.subheader(
+        f"task_type: {current_sample.get('task_type', '')}"
+        + (" | ⚠ 含极端 adv response" if sample_has_extreme_response(current_sample) else "")
+    )
+    render_sequence_overview(current_sample, adv_stats)
     render_sample_header(current_sample, run_dir)
 
     task_type = str(current_sample.get("task_type", ""))
@@ -928,24 +1311,29 @@ def main() -> None:
             sample_view=current_sample,
             annotations=annotations,
             max_tokens=int(max_tokens),
+            scope_key=scope_key,
+            highlight_extreme_adv=highlight_extreme_adv,
         )
     elif task_type == "table":
         render_table_sample(
             run_dir=run_dir,
             sample_view=current_sample,
             annotations=annotations,
+            scope_key=scope_key,
+            highlight_extreme_adv=highlight_extreme_adv,
         )
     elif task_type == "formula":
         render_formula_sample(
             run_dir=run_dir,
             sample_view=current_sample,
             annotations=annotations,
+            metadata=metadata,
+            scope_key=scope_key,
+            highlight_extreme_adv=highlight_extreme_adv,
         )
     else:
         st.warning(f"Unsupported task_type: {task_type}")
         st.dataframe(current_sample.get("pairs", []), use_container_width=True)
-
-    render_case_annotation_form(run_dir, annotations, current_sample)
 
     with st.expander("Run metadata", expanded=False):
         st.json(metadata)
