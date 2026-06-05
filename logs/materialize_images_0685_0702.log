@@ -1,0 +1,19 @@
+[rl_rollout_step_0685] images_hit=133 images_miss=0 methods={'existing_file': 87, 'formula_ground_truth_unique': 18, 'formula_ground_truth_first_match': 1, 'filtered_parquet_triple_lookup': 27}
+[rl_rollout_step_0686] images_hit=136 images_miss=0 methods={'filtered_parquet_triple_lookup': 77, 'formula_ground_truth_unique': 55, 'formula_ground_truth_first_match': 4}
+[rl_rollout_step_0687] images_hit=116 images_miss=0 methods={'filtered_parquet_triple_lookup': 74, 'formula_ground_truth_unique': 39, 'formula_ground_truth_first_match': 3}
+[rl_rollout_step_0688] images_hit=118 images_miss=0 methods={'filtered_parquet_triple_lookup': 73, 'formula_ground_truth_unique': 44, 'formula_ground_truth_first_match': 1}
+[rl_rollout_step_0689] images_hit=124 images_miss=0 methods={'filtered_parquet_triple_lookup': 70, 'formula_ground_truth_unique': 51, 'formula_ground_truth_first_match': 3}
+[rl_rollout_step_0690] images_hit=131 images_miss=0 methods={'formula_ground_truth_unique': 44, 'filtered_parquet_triple_lookup': 82, 'formula_ground_truth_first_match': 5}
+[rl_rollout_step_0691] images_hit=123 images_miss=0 methods={'filtered_parquet_triple_lookup': 76, 'formula_ground_truth_unique': 47}
+[rl_rollout_step_0692] images_hit=124 images_miss=0 methods={'filtered_parquet_triple_lookup': 66, 'formula_ground_truth_first_match': 7, 'formula_ground_truth_unique': 51}
+[rl_rollout_step_0693] images_hit=120 images_miss=0 methods={'filtered_parquet_triple_lookup': 72, 'formula_ground_truth_unique': 48}
+[rl_rollout_step_0694] images_hit=125 images_miss=0 methods={'filtered_parquet_triple_lookup': 73, 'formula_ground_truth_unique': 51, 'formula_ground_truth_first_match': 1}
+[rl_rollout_step_0695] images_hit=125 images_miss=0 methods={'filtered_parquet_triple_lookup': 73, 'formula_ground_truth_unique': 49, 'formula_ground_truth_first_match': 3}
+[rl_rollout_step_0696] images_hit=130 images_miss=0 methods={'filtered_parquet_triple_lookup': 70, 'formula_ground_truth_unique': 54, 'formula_ground_truth_first_match': 6}
+[rl_rollout_step_0697] images_hit=117 images_miss=0 methods={'filtered_parquet_triple_lookup': 75, 'formula_ground_truth_unique': 41, 'formula_ground_truth_first_match': 1}
+[rl_rollout_step_0698] images_hit=129 images_miss=0 methods={'filtered_parquet_triple_lookup': 68, 'formula_ground_truth_unique': 59, 'formula_ground_truth_first_match': 2}
+[rl_rollout_step_0699] images_hit=136 images_miss=0 methods={'filtered_parquet_triple_lookup': 81, 'formula_ground_truth_unique': 53, 'formula_ground_truth_first_match': 2}
+[rl_rollout_step_0700] images_hit=127 images_miss=0 methods={'filtered_parquet_triple_lookup': 80, 'formula_ground_truth_unique': 45, 'formula_ground_truth_first_match': 2}
+[rl_rollout_step_0701] images_hit=142 images_miss=0 methods={'filtered_parquet_triple_lookup': 81, 'formula_ground_truth_unique': 56, 'formula_ground_truth_first_match': 5}
+[rl_rollout_step_0702] images_hit=129 images_miss=0 methods={'existing_file': 129}
+Completed image materialization: runs=18 images_hit=2285 images_miss=0
